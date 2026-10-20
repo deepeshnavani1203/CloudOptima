@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+
+# Build outputs and coverage
+dist/
+coverage/
+.coverage
+htmlcov/
+
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Environment variables and credentials
+.env
+.env.*
+!.env.example
+backend/.env
+backend/.env.*
+!backend/.env.example
+*.pem
+*.key
+credentials.json
+
+# Logs and local databases
+*.log
+*.sqlite
+*.db

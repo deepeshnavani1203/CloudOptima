@@ -1,0 +1,48 @@
+### Health and integration status
+GET http://localhost:8000/api/health
+
+### Demo pricing
+GET http://localhost:8000/api/pricing
+
+### Classroom-only calculation example; these are not provider prices
+POST http://localhost:8000/api/cost/calculate
+Content-Type: application/json
+
+{
+  "current_provider": "AWS",
+  "target_provider": "GCP",
+  "current_hourly_cost": 0.10,
+  "target_hourly_cost": 0.07,
+  "duration_hours": 720,
+  "transfer_cost": 12,
+  "migration_overhead": 5,
+  "other_costs": 3,
+  "minimum_savings_percent": 1
+}
+
+### Provider recommendation
+POST http://localhost:8000/api/decisions/recommend
+Content-Type: application/json
+
+{
+  "current_provider": "AWS",
+  "duration_hours": 720,
+  "current_hourly_cost": 0.10,
+  "required_vcpu": 2,
+  "required_memory_gb": 8,
+  "transfer_cost": 1,
+  "migration_overhead": 1,
+  "minimum_savings_percent": 1,
+  "region": "us-east-1"
+}
+
+### Create simulation
+POST http://localhost:8000/api/migrations
+Content-Type: application/json
+
+{
+  "source_provider": "AWS",
+  "target_provider": "GCP",
+  "simulation": true,
+  "workload_name": "web-api-demo"
+}

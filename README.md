@@ -1,40 +1,20 @@
 # CloudOptima — Multi-Cloud Spot Cost Intelligence
 
-CloudOptima is a demo-first application for comparing AWS, Google Cloud, and Azure spot/preemptible compute costs. It provides normalized sample price records, deterministic cost calculations, a transparent provider recommendation, and a safe migration state-machine simulation.
+CloudOptima is a demo-first application for comparing AWS, Google Cloud, and Azure spot/preemptible compute costs. It provides a React dashboard, deterministic cost calculations, a conservative decision engine, and a safe migration state-machine simulation.
 
-> **Important:** The included prices are illustrative sample inputs, not live provider quotes. This build has no live spot-price or cloud provisioning adapters. Migration actions are simulations and do not create, modify, or terminate cloud resources.
+> **Pricing status:** No provider pricing adapters or credentials are configured. The application intentionally displays no provider prices rather than inventing them. Calculator figures must be entered by the user. Migration actions are simulations only and never create or modify real cloud resources.
 
-## What works
+## Features
 
-- Responsive React dashboard with pricing, calculator, decision engine, migration center, analytics, and integration settings.
-- FastAPI endpoints for sample pricing, deterministic cost analysis, provider recommendation, migration simulation, analytics, settings, and mock DNS validation.
-- Pydantic validation and deterministic cost/eligibility logic.
-- Explicit demo-only US East region grouping; no general region equivalence is inferred.
-- Migration state machine with health-check failure, cancellation, source-workload safety, transition history, and unique IDs.
-- Optional asynchronous MongoDB persistence. If MongoDB is unavailable, the backend logs a warning and reports that it is using in-memory demo storage; this data is not durable.
-- Focused pytest suite for calculations, pricing validation/freshness, recommendations, migration transitions, and the mock DNS adapter.
+- Responsive React dashboard: overview, pricing, calculator, decision engine, migration center, analytics, and settings.
+- FastAPI endpoints with Pydantic validation and REST/JSON contracts.
+- Deterministic cost calculation, one-time migration/transfer costs, break-even, and savings threshold checks.
+- Conservative decision response: without provider price records, it stays on the current cloud and reports that a recommendation cannot be verified.
+- Simulated migration states with health-check gate, cancellation, transition history, and source-workload safety.
+- Optional MongoDB persistence; when unavailable, the API explicitly reports memory-only storage.
+- Mock-only DNS adapter. No real DNS updates or cloud provisioning are enabled.
 
-## Architecture
-
-```text
-React + Vite frontend  ── REST/JSON ──>  FastAPI backend
-                                             ├── Pydantic request/data contracts
-                                             ├── deterministic pricing, cost, decision services
-                                             ├── simulation migration state machine
-                                             ├── mock DNS adapter
-                                             └── MongoDB (optional) / explicit memory demo store
-```
-
-MongoDB collections are prepared with indexes for `pricing_snapshots`, `workload_configs`, `cost_analyses`, `migrations`, and `audit_logs`. Cost analyses, price refreshes, migration state, and decision audit events use the store. Workload configuration and audit records are not yet exposed as CRUD APIs. MongoDB is shared application metadata in this demo; it does not replicate application-specific mutable state or provide cross-region disaster recovery.
-
-## Technology
-
-- Frontend: React 19 and Vite. The existing JavaScript starter is reused, with responsive CSS and native chart/table rendering.
-- Backend: Python, FastAPI, Pydantic, asynchronous PyMongo, and pytest.
-- Optional database: MongoDB Atlas or local MongoDB.
-- Live cloud SDKs, provider pricing APIs, DNS integrations, React Router, TypeScript, Tailwind, shadcn/ui, Recharts, Axios, and TanStack Query are **not wired in this demo build**. The UI does not imply otherwise.
-
-## Folder structure
+## Architecture and folder structure
 
 ```text
 CloudOptima/
@@ -42,67 +22,82 @@ CloudOptima/
 │   ├── app/
 │   │   ├── adapters/       # mock DNS adapter
 │   │   ├── routers/        # health, pricing, costs, decisions, analytics, migrations
-│   │   ├── services/       # pricing, cost, decisions, migration state machine
+│   │   ├── services/       # normalization, costs, decisions, migration state machine
 │   │   ├── config.py
 │   │   ├── db.py
-│   │   ├── main.py         # API composition and OpenAPI docs
+│   │   ├── main.py
 │   │   └── schemas.py
 │   ├── tests/
+│   ├── .env                # local config; ignored by Git
 │   ├── .env.example
-│   └── requirements.txt
-├── src/                    # existing React app, completed in place
-├── .env.example
+│   ├── pyproject.toml
+│   ├── uv.lock
+│   └── .venv/              # created locally by uv; ignored by Git
+├── src/                    # existing React/Vite frontend
+├── .env.example            # public Vite API URL only
+├── PROFESSOR_DEMO_GUIDE.md
 └── README.md
 ```
+
+MongoDB collection indexes are prepared for pricing snapshots, workload configurations, cost analyses, migrations, and audit logs. Current APIs persist cost analyses, migration records, and decision audit data. Pricing snapshots remain empty because no pricing adapter is available; workload configuration has no CRUD API yet. The database stores shared application metadata; this project does not implement cross-cloud or cross-region disaster recovery.
+
+## Technology and limitations
+
+- Frontend: React and Vite using the existing JavaScript starter, responsive CSS, and native chart/table rendering.
+- Backend: Python 3.11+, FastAPI, Pydantic, asynchronous PyMongo, `uv`, and pytest.
+- Optional database: MongoDB Atlas or a local MongoDB instance.
+- Not connected: live AWS/GCP/Azure pricing, cloud SDK provisioning, real DNS failover, auth, scheduled refresh, WebSockets, or Groq. TypeScript, Tailwind, React Router, Recharts, Axios, TanStack Query, and shadcn/ui are not used in this version.
 
 ## Prerequisites
 
 - Node.js 20.19+ or 22.12+ and npm.
-- Python 3.11 or later. Python 3.14 is supported by the installed dependencies used here.
-- MongoDB is optional for the demo. Without it, API persistence is in-memory for the lifetime of the backend process.
+- Python 3.11+.
+- `uv` installed and available in PowerShell.
+- MongoDB is optional. Without it, backend persistence is in-memory and records disappear when the API process stops.
 
 ## Windows PowerShell setup
 
-Run commands from the project folder (`C:\CloudOptima`).
+Run from `C:\CloudOptima`.
 
-### 1. Configure environment
+### Environment files
+
+`backend\.env` is already created with local demo settings, including:
+
+- `FRONTEND_ORIGIN=http://localhost:5173`
+- `MONGODB_URI=mongodb://localhost:27017`
+- `DATABASE_NAME=cloudoptima`
+- Demo mode enabled and optional provider credentials left blank
+
+`backend\.env.example` documents backend variables. The root `.env.example` contains only `VITE_API_URL=http://localhost:8000/api`; frontend variables must never contain secrets. If you need to recreate either file:
 
 ```powershell
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 if (-not (Test-Path backend\.env)) { Copy-Item backend\.env.example backend\.env }
 ```
 
-The checked-in `backend\.env` contains only safe local demo defaults and empty secret placeholders. Keep real credentials out of source control.
+No cloud API links or credentials were supplied, and those integrations are not implemented. Do not invent values for them. Add only real URLs/credentials obtained from provider consoles, and keep secrets in `backend\.env`.
 
-### 2. Create the Python environment and install backend dependencies
-
-```powershell
-python --version
-python -m venv backend\.venv
-.\backend\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-pip install -r backend\requirements.txt
-```
-
-Use Python 3.11 or later. This workspace was verified with Python 3.14.8.
-
-If PowerShell blocks activation, use this for the current terminal only, or run the venv interpreter directly:
+### Create/sync the backend virtual environment with uv
 
 ```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+Set-Location C:\CloudOptima\backend
+uv --version
+uv sync
 ```
 
-### 3. Start the API (Terminal 1)
+`uv sync` uses `pyproject.toml` and `uv.lock`, creates `backend\.venv`, and installs the locked dependencies. To choose a specific installed interpreter (3.11 or later), use `uv sync --python 3.11`.
+
+### Start the backend (Terminal 1)
 
 ```powershell
-Set-Location C:\CloudOptima
-.\backend\.venv\Scripts\Activate.ps1
-uvicorn app.main:app --app-dir backend --reload --host 127.0.0.1 --port 8000
+Set-Location C:\CloudOptima\backend
+uv run uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-The API is at `http://localhost:8000`; interactive OpenAPI documentation is at `http://localhost:8000/docs`.
+API base: `http://localhost:8000/api`  
+Interactive API docs: `http://localhost:8000/docs`
 
-### 4. Install frontend dependencies and start Vite (Terminal 2)
+### Start the frontend (Terminal 2)
 
 ```powershell
 Set-Location C:\CloudOptima
@@ -110,99 +105,64 @@ npm install
 npm run dev
 ```
 
-Open the URL Vite prints (normally `http://localhost:5173`). To use another API URL, set the public frontend variable `VITE_API_URL` in the root `.env` and restart Vite. Never put credentials in a `VITE_` variable.
+Open the Vite URL, normally `http://localhost:5173`.
 
-### 5. Run checks
-
-In the backend environment:
+### Run tests and frontend checks
 
 ```powershell
 Set-Location C:\CloudOptima\backend
-.\.venv\Scripts\python.exe -m pytest tests
-```
+uv run pytest
 
-From the project root:
-
-```powershell
+Set-Location C:\CloudOptima
 npm run build
 npm run lint
 ```
 
 ## MongoDB Atlas (optional)
 
-1. Create an Atlas project and a free or appropriately sized cluster.
-2. Create a database user with a strong unique password.
-3. In Atlas Network Access, allow only the IP addresses that need access; avoid `0.0.0.0/0` except for a temporary, controlled test.
-4. Copy the Python-driver connection string from Atlas and URL-encode special characters in the password.
-5. Set `MONGODB_URI` in `backend\.env` and optionally change `DATABASE_NAME`.
-6. Restart the backend and inspect `GET /api/health`. It reports `database.status=connected` and `persistence=mongodb` only after successful connection and index creation. Otherwise the API warns and identifies its memory-only fallback.
+1. Create an Atlas project and cluster, then a database user.
+2. Restrict Network Access to the application host's IP.
+3. Copy the Python-driver connection URI from the Atlas cluster page.
+4. Set `MONGODB_URI` in `backend\.env`, URL-encoding special characters in credentials.
+5. Restart FastAPI and check `GET /api/health` for `database.status=connected` and `persistence=mongodb`.
 
-Database user credentials must stay in the backend environment. Do not put them into the frontend environment or browser storage.
+MongoDB credentials stay in the backend environment. The frontend must never receive them.
 
-## API reference
+## API endpoints
 
-All routes are prefixed with `/api`. Requests and responses use JSON except the simple DNS simulation parameters. Validation errors use FastAPI's standard structured `detail`; unknown migration IDs return 404 and invalid state transitions return 409.
+All endpoints use the `/api` prefix.
 
-| Method | Route | Purpose |
+| Method | Endpoint | Purpose |
 |---|---|---|
-| GET | `/api/health` | API, MongoDB persistence mode, and integration status |
-| GET | `/api/pricing` | Clearly labeled demo price records and warnings |
-| POST | `/api/pricing/refresh` | Create new demo snapshots (does not call provider APIs) |
-| POST | `/api/cost/calculate` | Validate and calculate one deterministic cost estimate |
-| POST | `/api/decisions/recommend` | Rank eligible providers and explain rejected/no-savings outcomes |
-| GET | `/api/analytics/savings` | Saved analyses and migration counts |
-| POST | `/api/migrations` | Create an explicitly simulated migration |
-| GET | `/api/migrations` | List migrations |
-| GET | `/api/migrations/{migration_id}` | Get a migration and its timeline |
-| POST | `/api/migrations/{migration_id}/advance` | Advance one simulated state; health-check gate at `HEALTH_CHECK` |
-| POST | `/api/migrations/{migration_id}/cancel` | Cancel a non-terminal simulation |
-| GET | `/api/settings/status` | Same integration and persistence status as health |
-| POST | `/api/dns/simulate?endpoint=https%3A%2F%2Fexample.org&healthy=true` | Validate a target and simulate mock DNS behavior |
+| GET | `/health` | API mode, persistence, and integration status |
+| GET | `/pricing` | Configured normalized prices; currently an empty list with an availability warning |
+| POST | `/pricing/refresh` | Check configured adapters; currently reports none available |
+| POST | `/cost/calculate` | Deterministic cost breakdown using caller-provided inputs |
+| POST | `/decisions/recommend` | Rank known candidates or safely stay put if pricing is unavailable |
+| GET | `/analytics/savings` | Saved analyses and migration counts |
+| POST | `/migrations` | Create a simulation only |
+| GET | `/migrations` | List migration operations |
+| GET | `/migrations/{migration_id}` | Fetch a migration and its timeline |
+| POST | `/migrations/{migration_id}/advance` | Advance simulation and enforce health check |
+| POST | `/migrations/{migration_id}/cancel` | Cancel a non-terminal simulation |
+| GET | `/settings/status` | Integration and persistence status |
+| POST | `/dns/simulate?endpoint=https%3A%2F%2Fexample.org&healthy=true` | Validate endpoint and run mock DNS response |
 
-An example request collection is in [backend/requests.http](backend/requests.http).
+See [backend/requests.http](backend/requests.http) for API examples. Any calculator numbers there are labeled classroom examples, not provider prices.
 
-## Demo and live integration status
+## Demo versus live mode
 
-The application starts in demo mode without cloud credentials. Demo records are generated locally and include their source, timestamp, freshness, and unavailable-capacity caveat. Refreshing pricing only makes a new demo snapshot.
+The app works without cloud credentials. The pricing list remains empty because live provider adapters are not implemented. Cost calculations work with user-entered inputs. Without actual price records, the decision engine refuses to recommend moving clouds. The migration workflow can be exercised in simulation mode and is clearly distinguished from a real deployment.
 
-Live provider pricing, real cloud provisioning, real DNS failover, scheduled refresh, WebSockets, and Groq explanations are not implemented or enabled. AWS, GCP, and Azure credentials are not needed to run the demo. `APP_ENV` and provider-related environment variables are placeholders for future adapters; setting credentials alone does not enable live operations. The health response reports unsupported integrations as unavailable. No billable cloud resource operation is performed by this application.
+No AWS, GCP, Azure, DNS, or Groq account is required to run this build. Setting credentials in `.env` does not enable unsupported integrations.
 
-### Credentials to obtain only when implementing integrations
+## Security and billing notes
 
-None of these credentials are required for the current demo, and entering them will not turn on live integration:
+- `.env`, `.venv`, credentials, caches, build files, and logs are excluded by `.gitignore`.
+- No secrets belong in the root/Vite environment.
+- CORS is restricted to `FRONTEND_ORIGIN`.
+- Authentication is not implemented; do not expose this demo API to an untrusted network.
+- No live or billable cloud operations occur. Any future resource-writing integration must require separately reviewed least-privilege permissions, explicit confirmation, and billing safeguards.
+- DNS propagation is not instantaneous and must be independently checked if a real integration is ever added.
 
-- **AWS:** use an IAM role or named AWS CLI profile rather than embedding access keys. A future read-only spot-price adapter would need the specific EC2 spot-price history read permission; provisioning would require a separately reviewed permission set and remains disabled.
-- **GCP:** create/select a project in Google Cloud Console. For local development use Application Default Credentials (`gcloud auth application-default login`); for hosted services use a narrowly scoped service account. Do not grant project-wide Editor for pricing.
-- **Azure:** obtain the subscription ID from Azure Portal and use a Microsoft Entra application or managed identity for future server-side access. Keep read-only pricing access separate from any future resource-write permissions.
-- **MongoDB Atlas:** create a database user and copy the application connection string from the Atlas cluster's Connect flow.
-- **Groq (optional, not wired):** create an API key in the Groq Console; it must remain backend-only.
-- **DNS (mock only):** credentials would come from the selected DNS provider's API-token management page, scoped to the intended zone. No real DNS adapter is included.
-
-## Security and billing
-
-- Do not commit `.env` files, service-account files, cloud keys, database passwords, or DNS tokens.
-- Keep backend secrets server-side; only `VITE_API_URL` is suitable for frontend configuration.
-- CORS allows only `FRONTEND_ORIGIN` (default `http://localhost:5173`).
-- No authentication/authorization is implemented; do not expose this demo API to untrusted networks.
-- Do not use demo output as a purchasing decision or a cloud-provider quote.
-- Real migration/provisioning and DNS changes are disabled. Adding them would require explicit authorization, confirmation, safe resource scoping, and billing safeguards.
-- DNS changes, if added later, can take time to propagate and must be independently verified.
-
-## Demo walkthrough
-
-1. Start backend and frontend in separate PowerShell terminals.
-2. Open **Cloud pricing** and note that all three provider prices are labeled as sample estimates.
-3. Open **Cost calculator**, adjust duration and one-time egress/migration assumptions, and calculate the itemized result.
-4. Open **Decision engine**, set capacity and savings constraints, then run the analysis. The engine may recommend staying on the current provider if no candidate clears the configured threshold.
-5. Start a migration simulation. Advance through each state; at **Health check**, uncheck the success box and advance to observe the safe failure path, or leave it selected to progress through traffic switching and verification.
-6. Review **Analytics** and **Settings** to see migration counts and database/integration health.
-
-## Limitations and next steps
-
-- The UI is React/JavaScript rather than TypeScript and uses native CSS and chart rendering rather than the full requested frontend library list.
-- No provider price retrieval, availability/capacity APIs, cloud SDK adapters, authentication, DNS provider, background scheduler, or WebSocket progress transport is connected.
-- Demo region groups are intentionally limited; location equivalence and availability need provider-specific verified data before real comparison.
-- Browser-only fallback interactions are visibly described as local simulations; they are not persisted to the backend.
-- For production use, implement and test each cloud adapter independently, require explicit operation confirmation, add authentication/authorization, and establish persistence/backup and disaster-recovery policies.
-#   C l o u d O p t i m a  
- 
+For the professor-ready presentation sequence and classroom-only calculator example, see [PROFESSOR_DEMO_GUIDE.md](./PROFESSOR_DEMO_GUIDE.md).

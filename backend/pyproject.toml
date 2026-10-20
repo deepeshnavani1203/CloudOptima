@@ -1,0 +1,25 @@
+[project]
+name = "cloudoptima-backend"
+version = "0.1.0"
+description = "CloudOptima API for cloud cost calculations and migration simulation"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.34,<1",
+    "pydantic>=2.10,<3",
+    "pymongo>=4.13,<5",
+    "python-dotenv>=1,<2",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28,<1",
+    "pytest>=8.3,<9",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.uv]
+package = false
