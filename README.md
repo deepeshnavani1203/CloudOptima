@@ -1,15 +1,17 @@
 # CloudOptima — Multi-Cloud Spot Cost Intelligence
 
-CloudOptima is a demo-first application for comparing AWS, Google Cloud, and Azure spot/preemptible compute costs. It provides a React dashboard, deterministic cost calculations, a conservative decision engine, and a safe migration state-machine simulation.
+CloudOptima is a React + FastAPI cost-optimization workspace focused on Google Cloud Platform and Microsoft Azure. It retrieves public provider catalog data, normalizes supported hourly prices, saves observations when persistence is available, calculates cost estimates, and runs conservative decision analyses. Migration workflows remain simulations only.
 
-> **Pricing status:** No provider pricing adapters or credentials are configured. The application intentionally displays no provider prices rather than inventing them. Calculator figures must be entered by the user. Migration actions are simulations only and never create or modify real cloud resources.
+> **Pricing caveat:** Public retail catalog data is not a negotiated contract rate, actual bill, capacity guarantee, or deployed-resource cost. Unsupported pricing units, currency, model, or machine specifications remain explicit and are excluded from recommendations. AWS pricing is out of scope.
 
 ## Features
 
 - Responsive React dashboard: overview, pricing, calculator, decision engine, migration center, analytics, and settings.
 - FastAPI endpoints with Pydantic validation and REST/JSON contracts.
+- Backend-only Google Cloud Billing Catalog and Azure Retail Prices API adapters with bounded pagination, request timeouts, cache, and partial-provider failure handling.
+- Normalized pricing snapshots with source SKU/meter identifiers, price-model evidence, currency, native units, fetch time, and freshness.
 - Deterministic cost calculation, one-time migration/transfer costs, break-even, and savings threshold checks.
-- Conservative decision response: without provider price records, it stays on the current cloud and reports that a recommendation cannot be verified.
+- Conservative decision response: incomplete specs, stale data, unsupported rates, incompatible regions/models, or non-USD pricing are excluded.
 - Simulated migration states with health-check gate, cancellation, transition history, and source-workload safety.
 - Optional MongoDB persistence; when unavailable, the API explicitly reports memory-only storage.
 - Mock-only DNS adapter. No real DNS updates or cloud provisioning are enabled.
@@ -20,7 +22,7 @@ CloudOptima is a demo-first application for comparing AWS, Google Cloud, and Azu
 CloudOptima/
 ├── backend/
 │   ├── app/
-│   │   ├── adapters/       # mock DNS adapter
+│   │   ├── adapters/       # GCP/Azure pricing and mock DNS adapters
 │   │   ├── routers/        # health, pricing, costs, decisions, analytics, migrations
 │   │   ├── services/       # normalization, costs, decisions, migration state machine
 │   │   ├── config.py
@@ -39,14 +41,15 @@ CloudOptima/
 └── README.md
 ```
 
-MongoDB collection indexes are prepared for pricing snapshots, workload configurations, cost analyses, migrations, and audit logs. Current APIs persist cost analyses, migration records, and decision audit data. Pricing snapshots remain empty because no pricing adapter is available; workload configuration has no CRUD API yet. The database stores shared application metadata; this project does not implement cross-cloud or cross-region disaster recovery.
+MongoDB stores historical `pricing_snapshots`, `cost_analyses`, `decision_analyses`, migration simulations in the existing `migrations` collection, and audit events in the existing `audit_logs` collection. Pricing snapshots retain provider identifiers and observation timestamps rather than replacing older observations. These records power the explorer, workspace history, and deterministic recommendations. MongoDB is optional; memory mode is reported and is not durable across API restarts.
 
 ## Technology and limitations
 
 - Frontend: React and Vite using the existing JavaScript starter, responsive CSS, and native chart/table rendering.
 - Backend: Python 3.11+, FastAPI, Pydantic, asynchronous PyMongo, `uv`, and pytest.
 - Optional database: MongoDB Atlas or a local MongoDB instance.
-- Not connected: live AWS/GCP/Azure pricing, cloud SDK provisioning, real DNS failover, auth, scheduled refresh, WebSockets, or Groq. TypeScript, Tailwind, React Router, Recharts, Axios, TanStack Query, and shadcn/ui are not used in this version.
+- Not connected: cloud SDK provisioning, real DNS failover, authentication, scheduled refresh, WebSockets, or Groq explanations. TypeScript, Tailwind, React Router, Recharts, Axios, TanStack Query, and shadcn/ui are not used in this version.
+- AWS pricing is deliberately not integrated. Existing provider enums remain for backward compatibility in non-pricing APIs.
 
 ## Prerequisites
 
@@ -61,21 +64,16 @@ Run from `C:\CloudOptima`.
 
 ### Environment files
 
-`backend\.env` is already created with local demo settings, including:
-
-- `FRONTEND_ORIGIN=http://localhost:5173`
-- `MONGODB_URI=mongodb://localhost:27017`
-- `DATABASE_NAME=cloudoptima`
-- Demo mode enabled and optional provider credentials left blank
-
-`backend\.env.example` documents backend variables. The root `.env.example` contains only `VITE_API_URL=http://localhost:8000/api`; frontend variables must never contain secrets. If you need to recreate either file:
+Configure real local values in `backend\.env`; do not replace that file with the template. `backend\.env.example` is a reference template with placeholders and non-secret defaults. The root `.env.example` contains only `VITE_API_URL=http://localhost:8000/api`; frontend variables must never contain secrets. If you need to create a local file that does not yet exist:
 
 ```powershell
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
 if (-not (Test-Path backend\.env)) { Copy-Item backend\.env.example backend\.env }
 ```
 
-No cloud API links or credentials were supplied, and those integrations are not implemented. Do not invent values for them. Add only real URLs/credentials obtained from provider consoles, and keep secrets in `backend\.env`.
+`GCP_BILLING_API_KEY` is used only by the backend catalog adapter. The public Azure Retail Prices API does not require `AZURE_SUBSCRIPTION_ID`; Azure pricing must be explicitly enabled with `AZURE_PRICING_ENABLED=true`. `GOOGLE_APPLICATION_CREDENTIALS` is not required for public catalog requests. Keep all secrets in `backend\.env`.
+
+The backend supports `APP_ENV`, `DEMO_MODE`, `FRONTEND_ORIGIN`, `MONGODB_URI`, `DATABASE_NAME`, `GROQ_API_KEY`, `GROQ_MODEL`, `GCP_PROJECT_ID`, `GCP_BILLING_API_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`, `AZURE_SUBSCRIPTION_ID`, `AZURE_PRICING_ENABLED`, `DNS_ADAPTER`, and `DNS_API_TOKEN`. Only the GCP billing key is needed for the public GCP catalog; Azure's public retail catalog is anonymous. `GROQ_API_KEY` and the DNS token are not used by the current pricing path.
 
 ### Create/sync the backend virtual environment with uv
 
@@ -135,11 +133,12 @@ All endpoints use the `/api` prefix.
 | Method | Endpoint | Purpose |
 |---|---|---|
 | GET | `/health` | API mode, persistence, and integration status |
-| GET | `/pricing` | Configured normalized prices; currently an empty list with an availability warning |
-| POST | `/pricing/refresh` | Check configured adapters; currently reports none available |
+| GET | `/pricing` | Stored normalized observations; supports provider, region, model, search, freshness, and pagination filters |
+| POST | `/pricing/refresh` | Refresh configured GCP and Azure catalogs; accepts optional `?region=eastus` for Azure |
+| GET | `/pricing/status` | Per-provider configuration, last attempt/success, cache, and safe error status |
 | POST | `/cost/calculate` | Deterministic cost breakdown using caller-provided inputs |
-| POST | `/decisions/recommend` | Rank known candidates or safely stay put if pricing is unavailable |
-| GET | `/analytics/savings` | Saved analyses and migration counts |
+| POST | `/decisions/recommend` | Filter and rank only valid, compatible, like-for-like price records |
+| GET | `/analytics/savings` | Saved cost and decision analyses, price snapshots, and migration counts |
 | POST | `/migrations` | Create a simulation only |
 | GET | `/migrations` | List migration operations |
 | GET | `/migrations/{migration_id}` | Fetch a migration and its timeline |
@@ -152,9 +151,9 @@ See [backend/requests.http](backend/requests.http) for API examples. Any calcula
 
 ## Demo versus live mode
 
-The app works without cloud credentials. The pricing list remains empty because live provider adapters are not implemented. Cost calculations work with user-entered inputs. Without actual price records, the decision engine refuses to recommend moving clouds. The migration workflow can be exercised in simulation mode and is clearly distinguished from a real deployment.
+The app starts without provider credentials. GCP needs a backend API key; Azure's public catalog is enabled separately by configuration. Missing or failed integrations are reported without erasing the other provider's data. Cached results retain their original observation timestamps. The decision engine stays on the current provider if it cannot verify an eligible alternative. The migration workflow is simulation-only.
 
-No AWS, GCP, Azure, DNS, or Groq account is required to run this build. Setting credentials in `.env` does not enable unsupported integrations.
+GCP and Azure catalog refreshes may make public HTTPS requests when you use **Refresh pricing**. Tests mock provider requests and do not require credentials. MongoDB is optional. No cloud resource or real DNS operation is performed.
 
 ## Security and billing notes
 
@@ -165,4 +164,6 @@ No AWS, GCP, Azure, DNS, or Groq account is required to run this build. Setting 
 - No live or billable cloud operations occur. Any future resource-writing integration must require separately reviewed least-privilege permissions, explicit confirmation, and billing safeguards.
 - DNS propagation is not instantaneous and must be independently checked if a real integration is ever added.
 
-For the professor-ready presentation sequence and classroom-only calculator example, see [PROFESSOR_DEMO_GUIDE.md](./PROFESSOR_DEMO_GUIDE.md).
+The backend returns safe provider errors without response bodies, authorization headers, or API keys. GCP credentials are sent in a backend request header and are never returned to the browser.
+
+Provider references: [Google Cloud Billing Catalog API](https://cloud.google.com/billing/v1/how-tos/catalog-api) and [Azure Retail Prices REST API](https://learn.microsoft.com/en-us/rest/api/cost-management/retail-prices/azure-retail-prices). Refresh is bounded and cached; the API's catalog records may not expose comparable whole-instance prices or verified machine specifications, so such rows are shown as unsupported and excluded from recommendations.

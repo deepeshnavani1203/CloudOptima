@@ -30,8 +30,13 @@ def calculate_costs(request: CostRequest) -> dict:
         "minimum_savings_percent": request.minimum_savings_percent,
         "meets_savings_threshold": savings_percent >= request.minimum_savings_percent,
         "assumptions": [
+            "This is an estimate based on the prices and assumptions supplied; it is not a bill or guaranteed saving.",
             "Hourly costs are multiplied by workload duration.",
             "Transfer, migration, and other costs are one-time estimates added once.",
-            "Taxes, discounts, licensing, and non-compute services are excluded unless included in other costs.",
+            "Taxes, negotiated discounts, storage, licensing, support, and non-compute services are excluded unless user estimates are included in other costs.",
+        ],
+        "missing_cost_categories": [
+            "Taxes and negotiated discounts",
+            "Storage, licensing, support, and other non-compute services",
         ],
     }

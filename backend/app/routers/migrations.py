@@ -71,4 +71,9 @@ async def cancel(migration_id: str):
         raise HTTPException(status_code=404, detail="Migration not found.")
     updated = cancel_migration(migration)
     await store.replace("migrations", migration_id, updated)
+    await store.insert("audit_logs", f"migration:{migration_id}:{updated['updated_at'].isoformat()}", {
+        "resource_id": migration_id,
+        "action": "simulation_cancelled",
+        "created_at": updated["updated_at"],
+    })
     return serialize(updated)

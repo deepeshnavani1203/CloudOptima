@@ -21,7 +21,7 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(
     title="CloudOptima API",
-    description="Demo-first multi-cloud spot cost analysis and migration simulation API.",
+    description="GCP and Azure public catalog pricing, cost analysis, and migration simulation API.",
     version="1.0.0",
     lifespan=lifespan,
 )

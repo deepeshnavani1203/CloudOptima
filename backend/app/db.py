@@ -38,6 +38,7 @@ class DocumentStore:
             "pricing_snapshots": [("observed_at", DESCENDING), ("provider", ASCENDING)],
             "workload_configs": [("workload_name", ASCENDING)],
             "cost_analyses": [("created_at", DESCENDING)],
+            "decision_analyses": [("created_at", DESCENDING)],
             "migrations": [("migration_id", ASCENDING), ("created_at", DESCENDING)],
             "audit_logs": [("created_at", DESCENDING), ("resource_id", ASCENDING)],
         }
@@ -48,7 +49,12 @@ class DocumentStore:
 
     async def insert(self, collection: str, key: str, document: dict):
         if self.mode == "mongodb":
-            await self.database[collection].insert_one(dict(document))
+            payload = dict(document)
+            if collection == "pricing_snapshots":
+                payload["_id"] = key
+                await self.database[collection].replace_one({"_id": key}, payload, upsert=True)
+            else:
+                await self.database[collection].insert_one(payload)
         else:
             self._memory[collection][key] = document
 
@@ -61,6 +67,11 @@ class DocumentStore:
     async def get(self, collection: str, key: str):
         if self.mode == "mongodb":
             return await self.database[collection].find_one({"migration_id": key}, {"_id": 0})
+        return self._memory[collection].get(key)
+
+    async def get_by_id(self, collection: str, key: str):
+        if self.mode == "mongodb":
+            return await self.database[collection].find_one({"_id": key}, {"_id": 0})
         return self._memory[collection].get(key)
 
     async def list(self, collection: str, limit: int = 100):

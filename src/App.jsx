@@ -1,104 +1,123 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import './App.css'
 
 const API = import.meta.env.VITE_API_URL || 'http://localhost:8000/api'
-const navItems = [
-  ['Dashboard', 'Overview', '⌂'],
-  ['Cloud pricing', 'Pricing', '◈'],
-  ['Cost calculator', 'Calculator', '⌗'],
-  ['Decision engine', 'Decision', '✳'],
-  ['Migration center', 'Migrations', '⇄'],
-  ['Analytics', 'Analytics', '▥'],
-  ['Settings', 'Settings', '⚙'],
+const navigation = [
+  ['Overview', '⌂'],
+  ['Cloud pricing', '◈'],
+  ['Cost calculator', '⌗'],
+  ['Best cloud decision', '✳'],
+  ['Migration center', '⇄'],
+  ['Analytics & history', '▥'],
+  ['Settings', '⚙'],
 ]
-const money = (value, digits = 2) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: digits, maximumFractionDigits: digits }).format(Number(value) || 0)
-const shortMoney = (value) => money(value, 4)
-const providerColor = { AWS: '#f39a37', GCP: '#4588f5', Azure: '#36b2a2' }
-const displayDate = (value) => value ? new Date(value).toLocaleString() : 'Not available'
-const initialCalculator = { current_provider: 'AWS', current_hourly_cost: '', target_provider: 'GCP', target_hourly_cost: '', duration_hours: '', transfer_cost: '', migration_overhead: '', other_costs: '', minimum_savings_percent: '', required_vcpu: '', required_memory_gb: '', region: '' }
-
-function localRecommendation(prices, assumptions) {
-  if (!prices.length) {
-    return {
-      recommended_provider: assumptions.current_provider,
-      reason: 'No pricing records are available; no alternative can be verified. Stay on the current provider until pricing is configured.',
-      candidates: [],
-      estimated_net_savings: null,
-      savings_percent: null,
-      mode: 'demo',
-    }
-  }
-  const currentTotal = Number(assumptions.current_hourly_cost) * Number(assumptions.duration_hours)
-  const eligible = prices.filter((item) => item.provider !== assumptions.current_provider && item.vcpu >= Number(assumptions.required_vcpu) && item.memory_gb >= Number(assumptions.required_memory_gb) && item.region.toLowerCase() === String(assumptions.region || '').toLowerCase() && item.freshness === 'fresh')
-    .map((item) => {
-      const total = item.hourly_price * Number(assumptions.duration_hours) + Number(assumptions.transfer_cost) + Number(assumptions.migration_overhead) + Number(assumptions.other_costs || 0)
-      const savings = currentTotal - total
-      const savingsPercent = currentTotal ? savings / currentTotal * 100 : 0
-      return { provider: item.provider, total_cost: total, hourly_price: item.hourly_price, eligible: savings > 0 && savingsPercent >= Number(assumptions.minimum_savings_percent), savings, savings_percent: savingsPercent, reason: 'Estimated total cost includes one-time transfer and migration costs.' }
-    }).sort((a, b) => a.total_cost - b.total_cost)
-  const selected = eligible.find((item) => item.eligible)
-  return {
-    recommended_provider: selected?.provider || assumptions.current_provider,
-    reason: selected ? `${selected.provider} has the lowest eligible total cost and meets your savings threshold.` : 'No alternative meets your minimum savings threshold; stay on the current provider.',
-    candidates: eligible,
-    estimated_net_savings: selected?.savings ?? 0,
-    savings_percent: selected?.savings_percent ?? 0,
-    mode: 'demo',
+const providers = ['GCP', 'Azure']
+const colors = { GCP: '#4285f4', Azure: '#16a6a1' }
+const formatMoney = (value, digits = 4, currency = 'USD') => {
+  if (value == null || !Number.isFinite(Number(value))) return '—'
+  try {
+    return new Intl.NumberFormat('en-US', {
+      style: 'currency',
+      currency,
+      minimumFractionDigits: digits,
+      maximumFractionDigits: digits,
+    }).format(Number(value))
+  } catch {
+    return `${Number(value).toFixed(digits)} ${currency}`
   }
 }
+const formatDate = (value) => value ? new Date(value).toLocaleString() : 'Not fetched'
+const terminalStates = ['COMPLETED', 'FAILED', 'CANCELLED']
+const initialCost = {
+  current_provider: 'GCP',
+  current_hourly_cost: '',
+  target_provider: 'Azure',
+  target_hourly_cost: '',
+  duration_hours: '',
+  transfer_cost: '0',
+  migration_overhead: '0',
+  other_costs: '0',
+  minimum_savings_percent: '0',
+  pricing_snapshot_id: '',
+}
+const emptyStatus = {
+  mode: 'demo',
+  database: { status: 'checking', persistence: 'memory' },
+  integrations: {},
+  pricing: { providers: {} },
+}
 
-function Icon({ children }) {
-  return <span aria-hidden="true" className="nav-icon">{children}</span>
+async function api(path, options = {}) {
+  const response = await fetch(`${API}${path}`, {
+    ...options,
+    headers: { 'Content-Type': 'application/json', ...options.headers },
+  })
+  const body = await response.json().catch(() => ({}))
+  if (!response.ok) {
+    const message = typeof body.detail === 'string' ? body.detail : body.message
+    throw new Error(message || `Request failed (${response.status})`)
+  }
+  return body
 }
 
 function App() {
-  const [page, setPage] = useState('Dashboard')
+  const [page, setPage] = useState('Overview')
   const [pricing, setPricing] = useState([])
+  const [status, setStatus] = useState(emptyStatus)
   const [migrations, setMigrations] = useState([])
-  const [serviceStatus, setServiceStatus] = useState({ mode: 'demo', database: 'checking', persistence: 'memory' })
-  const [pricingBusy, setPricingBusy] = useState(false)
-  const [toast, setToast] = useState('')
+  const [history, setHistory] = useState({ items: [], migration_counts: {} })
+  const [cost, setCost] = useState(initialCost)
   const [analysis, setAnalysis] = useState(null)
-  const [recommendation, setRecommendation] = useState(null)
-  const [calculator, setCalculator] = useState(initialCalculator)
-  const [formError, setFormError] = useState('')
+  const [decision, setDecision] = useState(null)
+  const [pricingBusy, setPricingBusy] = useState(false)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [toast, setToast] = useState('')
+  const [region, setRegion] = useState('')
   const [healthCheckPassed, setHealthCheckPassed] = useState(true)
+  const [decisionInputs, setDecisionInputs] = useState({
+    current_provider: 'GCP',
+    current_hourly_cost: '',
+    duration_hours: '720',
+    required_vcpu: '',
+    required_memory_gb: '',
+    transfer_cost: '0',
+    migration_overhead: '0',
+    minimum_savings_percent: '10',
+    region: '',
+    pricing_type: 'OnDemand',
+    workload_tolerates_interruptions: false,
+  })
+  const [migrationInputs, setMigrationInputs] = useState({
+    source_provider: 'GCP',
+    target_provider: 'Azure',
+    workload_name: '',
+  })
 
-  const notify = (message) => {
+  const notify = useCallback((message) => {
     setToast(message)
-    window.setTimeout(() => setToast(''), 3800)
-  }
-
-  const request = useCallback(async (path, options = {}) => {
-    const response = await fetch(`${API}${path}`, {
-      ...options,
-      headers: { 'Content-Type': 'application/json', ...options.headers },
-    })
-    const body = await response.json().catch(() => ({}))
-    if (!response.ok) {
-      const message = typeof body.detail === 'string' ? body.detail : body.message
-      const error = new Error(message || `Request failed (${response.status})`)
-      error.status = response.status
-      throw error
-    }
-    return body
+    window.setTimeout(() => setToast(''), 4500)
   }, [])
 
   const loadData = useCallback(async () => {
-    try {
-      const [health, priceData, migrationData] = await Promise.all([
-        request('/health'),
-        request('/pricing'),
-        request('/migrations'),
-      ])
-      setServiceStatus({ mode: health.mode || 'demo', database: health.database?.status || 'unavailable', persistence: health.database?.persistence || 'memory' })
-      setPricing(priceData.items || [])
-      setMigrations(migrationData.items || [])
-    } catch (error) {
-      setServiceStatus({ mode: 'demo', database: error.status ? 'error' : 'unavailable', persistence: 'browser demo' })
-      if (error.status) notify(`Backend request failed (${error.status}). ${error.message}`)
-    }
-  }, [request])
+    setLoading(true)
+    setError('')
+    const results = await Promise.allSettled([
+      api('/health'),
+      api('/pricing?limit=500'),
+      api('/pricing/status'),
+      api('/migrations'),
+      api('/analytics/savings'),
+    ])
+    if (results[0].status === 'fulfilled') setStatus((current) => ({ ...current, ...results[0].value }))
+    if (results[1].status === 'fulfilled') setPricing(results[1].value.items || [])
+    if (results[2].status === 'fulfilled') setStatus((current) => ({ ...current, pricing: results[2].value }))
+    if (results[3].status === 'fulfilled') setMigrations(results[3].value.items || [])
+    if (results[4].status === 'fulfilled') setHistory(results[4].value)
+    const failed = results.find((result) => result.status === 'rejected')
+    if (failed) setError(`Some workspace data could not be loaded: ${failed.reason.message}`)
+    setLoading(false)
+  }, [])
 
   useEffect(() => {
     const timer = window.setTimeout(() => { void loadData() }, 0)
@@ -107,178 +126,179 @@ function App() {
 
   const refreshPricing = async () => {
     setPricingBusy(true)
+    setError('')
     try {
-      const result = await request('/pricing/refresh', { method: 'POST' })
+      const query = region ? `?region=${encodeURIComponent(region)}` : ''
+      const result = await api(`/pricing/refresh${query}`, { method: 'POST' })
       setPricing(result.items || [])
-      notify(result.message || 'Demo pricing refreshed. Live provider APIs are not configured.')
-    } catch (error) {
-      if (error.status) {
-        notify(`Pricing refresh failed. ${error.message}`)
-        return
-      }
-      setPricing([])
-      notify(`Pricing is unavailable because the backend could not be reached. ${error.message}`)
+      const latestStatus = await api('/pricing/status')
+      setStatus((current) => ({ ...current, pricing: latestStatus }))
+      const succeeded = Object.values(result.providers || {}).filter((item) => item.records_normalized > 0).length
+      notify(succeeded ? `Refresh finished. ${result.records_normalized} catalog records normalized.` : 'Refresh finished without supported price records. See provider status and warnings.')
+      if (result.errors?.length) setError(result.errors.join(' '))
+    } catch (requestError) {
+      setError(`Pricing refresh failed: ${requestError.message}`)
     } finally {
       setPricingBusy(false)
     }
   }
 
   const calculate = async (event) => {
-    event?.preventDefault()
-    setFormError('')
+    event.preventDefault()
+    setError('')
     try {
-      const result = await request('/cost/calculate', {
+      const result = await api('/cost/calculate', {
         method: 'POST',
-        body: JSON.stringify({
-          current_hourly_cost: Number(calculator.current_hourly_cost),
-          target_hourly_cost: Number(calculator.target_hourly_cost),
-          duration_hours: Number(calculator.duration_hours),
-          transfer_cost: Number(calculator.transfer_cost),
-          migration_overhead: Number(calculator.migration_overhead),
-          other_costs: Number(calculator.other_costs),
-          minimum_savings_percent: Number(calculator.minimum_savings_percent),
-          current_provider: calculator.current_provider,
-          target_provider: calculator.target_provider,
-        }),
+        body: JSON.stringify(Object.fromEntries(
+          Object.entries(cost).map(([key, value]) => [
+            key,
+            ['current_provider', 'target_provider', 'pricing_snapshot_id'].includes(key) ? (value || null) : Number(value),
+          ]),
+        )),
       })
       setAnalysis(result)
-    } catch (error) {
-      if (error.status) {
-        setFormError(error.message)
-        return
-      }
-      const current = Number(calculator.current_hourly_cost) * Number(calculator.duration_hours)
-      const target = Number(calculator.target_hourly_cost) * Number(calculator.duration_hours) + Number(calculator.transfer_cost) + Number(calculator.migration_overhead) + Number(calculator.other_costs)
-      if ([current, target, Number(calculator.duration_hours)].some((value) => !Number.isFinite(value) || value < 0) || Number(calculator.duration_hours) <= 0) {
-        setFormError('Enter valid non-negative costs and a duration greater than zero.')
-        return
-      }
-      const savings = current - target
-      setAnalysis({ current_cost: current, target_total_cost: target, target_compute_cost: Number(calculator.target_hourly_cost) * Number(calculator.duration_hours), transfer_cost: Number(calculator.transfer_cost), migration_overhead: Number(calculator.migration_overhead), other_costs: Number(calculator.other_costs), net_savings: savings, savings_percent: current ? savings / current * 100 : 0, break_even_hours: Number(calculator.current_hourly_cost) > Number(calculator.target_hourly_cost) ? (Number(calculator.transfer_cost) + Number(calculator.migration_overhead) + Number(calculator.other_costs)) / (Number(calculator.current_hourly_cost) - Number(calculator.target_hourly_cost)) : null, note: 'Calculated in browser because the API is unavailable; estimates only.' })
-      notify(`Using a browser-only calculation because the API is unavailable. ${error.message}`)
+      setHistory((current) => ({ ...current, items: [result, ...(current.items || [])] }))
+      notify('Estimate saved. It is based on your supplied inputs, not billing data.')
+    } catch (requestError) {
+      setError(`Could not calculate estimate: ${requestError.message}`)
     }
   }
 
-  const recommend = async () => {
-    const requiredValues = ['current_hourly_cost', 'duration_hours', 'required_vcpu', 'required_memory_gb', 'minimum_savings_percent']
-    if (requiredValues.some((key) => calculator[key] === '' || !Number.isFinite(Number(calculator[key]))) || Number(calculator.duration_hours) <= 0 || !calculator.region) {
-      notify('Enter the current hourly price, duration, capacity, threshold, and region before analyzing.')
+  const runDecision = async (event) => {
+    event.preventDefault()
+    setError('')
+    try {
+      const request = {
+        ...decisionInputs,
+        duration_hours: Number(decisionInputs.duration_hours),
+        current_hourly_cost: Number(decisionInputs.current_hourly_cost),
+        required_vcpu: Number(decisionInputs.required_vcpu),
+        required_memory_gb: Number(decisionInputs.required_memory_gb),
+        transfer_cost: Number(decisionInputs.transfer_cost),
+        migration_overhead: Number(decisionInputs.migration_overhead),
+        minimum_savings_percent: Number(decisionInputs.minimum_savings_percent),
+      }
+      const result = await api('/decisions/recommend', { method: 'POST', body: JSON.stringify(request) })
+      setDecision(result)
+    } catch (requestError) {
+      setError(`Decision could not be evaluated: ${requestError.message}`)
+    }
+  }
+
+  const createMigration = async (event) => {
+    event.preventDefault()
+    if (migrationInputs.source_provider === migrationInputs.target_provider) {
+      setError('Choose different source and target providers for the simulation.')
       return
     }
+    setError('')
     try {
-      const result = await request('/decisions/recommend', {
+      const result = await api('/migrations', {
         method: 'POST',
-        body: JSON.stringify({
-          current_provider: calculator.current_provider,
-          duration_hours: Number(calculator.duration_hours),
-          current_hourly_cost: Number(calculator.current_hourly_cost),
-          required_vcpu: Number(calculator.required_vcpu),
-          required_memory_gb: Number(calculator.required_memory_gb),
-          transfer_cost: Number(calculator.transfer_cost),
-          migration_overhead: Number(calculator.migration_overhead),
-          minimum_savings_percent: Number(calculator.minimum_savings_percent),
-          region: calculator.region,
-        }),
+        body: JSON.stringify({ ...migrationInputs, simulation: true }),
       })
-      setRecommendation(result)
-    } catch (error) {
-      if (error.status) {
-        notify(`Recommendation failed. ${error.message}`)
-        return
-      }
-      setRecommendation(localRecommendation(pricing, calculator))
-      notify('Evaluated locally because the API is unavailable; estimates only.')
+      setMigrations((current) => [result, ...current])
+      notify('Simulation created. No cloud resources were created or moved.')
+    } catch (requestError) {
+      setError(`Simulation could not be created: ${requestError.message}`)
     }
-  }
-
-  const createMigration = async (target) => {
-    const migrationTarget = target === calculator.current_provider
-      ? (calculator.current_provider === 'AWS' ? 'GCP' : 'AWS')
-      : target || (calculator.current_provider === 'AWS' ? 'GCP' : 'AWS')
-    try {
-      const result = await request('/migrations', {
-        method: 'POST',
-        body: JSON.stringify({ source_provider: calculator.current_provider, target_provider: migrationTarget, simulation: true, workload_name: 'unspecified' }),
-      })
-      setMigrations((items) => [result, ...items])
-      notify('Simulation created. No cloud resources were provisioned.')
-    } catch (error) {
-      if (error.status) {
-        notify(`Could not create simulation. ${error.message}`)
-        return
-      }
-      const newItem = { migration_id: `sim-${Date.now()}`, source_provider: calculator.current_provider, target_provider: migrationTarget, workload_name: 'unspecified', state: 'PENDING', simulation: true, created_at: new Date().toISOString(), history: [{ state: 'PENDING', at: new Date().toISOString(), message: 'Simulation created locally; no cloud resources provisioned.' }] }
-      setMigrations((items) => [newItem, ...items])
-      notify(`Backend unavailable; migration is a browser-only simulation. ${error.message}`)
-    }
-    setPage('Migration center')
   }
 
   const advanceMigration = async (migration) => {
     try {
-      const result = await request(`/migrations/${migration.migration_id}/advance`, {
+      const result = await api(`/migrations/${migration.migration_id}/advance`, {
         method: 'POST',
         body: JSON.stringify({ health_check_passed: healthCheckPassed, confirm_live: false }),
       })
-      setMigrations((items) => items.map((item) => item.migration_id === migration.migration_id ? result : item))
-    } catch (error) {
-      if (error.status) {
-        notify(`Could not advance simulation. ${error.message}`)
-        return
-      }
-      const path = ['PENDING', 'PROVISIONING', 'DEPLOYING', 'HEALTH_CHECK', 'READY_TO_SWITCH', 'SWITCHING_TRAFFIC', 'VERIFYING', 'COMPLETED']
-      const next = migration.state === 'HEALTH_CHECK' && !healthCheckPassed ? 'FAILED' : path[Math.min(path.indexOf(migration.state) + 1, path.length - 1)]
-      setMigrations((items) => items.map((item) => item.migration_id === migration.migration_id ? { ...item, state: next, updated_at: new Date().toISOString(), history: [...(item.history || []), { state: next, at: new Date().toISOString(), message: next === 'FAILED' ? 'Health check failed.' : 'Browser-only simulation transition.' }] } : item))
-      notify('Advanced browser-only simulation. No cloud resources were changed.')
+      setMigrations((current) => current.map((item) => item.migration_id === result.migration_id ? result : item))
+    } catch (requestError) {
+      setError(`Simulation was not advanced: ${requestError.message}`)
     }
   }
 
   const cancelMigration = async (migration) => {
     try {
-      const result = await request(`/migrations/${migration.migration_id}/cancel`, { method: 'POST' })
-      setMigrations((items) => items.map((item) => item.migration_id === migration.migration_id ? result : item))
-    } catch (error) {
-      if (error.status) {
-        notify(`Could not cancel simulation. ${error.message}`)
-        return
-      }
-      setMigrations((items) => items.map((item) => item.migration_id === migration.migration_id ? { ...item, state: 'CANCELLED', updated_at: new Date().toISOString() } : item))
-      notify('Simulation cancelled locally.')
+      const result = await api(`/migrations/${migration.migration_id}/cancel`, { method: 'POST' })
+      setMigrations((current) => current.map((item) => item.migration_id === result.migration_id ? result : item))
+    } catch (requestError) {
+      setError(`Simulation was not cancelled: ${requestError.message}`)
     }
   }
 
-  const recommended = recommendation?.recommended_provider
+  const prepareMigration = (sourceProvider, targetProvider) => {
+    setMigrationInputs((current) => ({
+      ...current,
+      source_provider: sourceProvider,
+      target_provider: targetProvider,
+      workload_name: current.workload_name || 'decision-candidate',
+    }))
+    setPage('Migration center')
+  }
+
+  const savedSavings = (history.items || []).reduce((total, item) => total + (Number(item.net_savings) || 0), 0)
+  const currentStatus = Object.values(status.pricing?.providers || {})
+  const latestFetch = currentStatus
+    .map((item) => item.last_successful_fetch_at)
+    .filter(Boolean)
+    .sort((a, b) => new Date(b) - new Date(a))[0]
 
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <div className="brand"><span className="brand-mark">◈</span><span>cloud<span className="brand-light">optima</span></span></div>
-        <div className="workspace-label">WORKSPACE</div>
+        <a className="brand" href="#" onClick={(event) => { event.preventDefault(); setPage('Overview') }}>
+          <span className="brand-mark">C</span><span>cloud<span className="brand-light">optima</span></span>
+        </a>
+        <div className="workspace-caption">WORKSPACE</div>
         <div className="workspace-switch"><span className="workspace-avatar">C</span><span><b>CloudOptima</b><small>Local workspace</small></span></div>
         <nav aria-label="Main navigation">
-          {navItems.map(([label, short, icon]) => (
-            <button key={label} className={`nav-item ${page === label ? 'active' : ''}`} onClick={() => setPage(label)}><Icon>{icon}</Icon><span>{short}</span>{label === 'Migration center' && migrations.length > 0 && <span className="nav-count">{migrations.length}</span>}</button>
+          {navigation.map(([label, icon]) => (
+            <button key={label} className={`nav-item ${page === label ? 'active' : ''}`} onClick={() => setPage(label)}>
+              <span className="nav-icon">{icon}</span><span>{label}</span>
+              {label === 'Migration center' && migrations.length > 0 && <span className="nav-count">{migrations.length}</span>}
+            </button>
           ))}
         </nav>
-        <div className="sidebar-bottom">
-          <div className="help-card"><span className="help-icon">?</span><b>Need a hand?</b><p>Explore the getting started guide.</p><button onClick={() => notify('Connect the FastAPI backend for the full guided demo.')}>Open guide <span>↗</span></button></div>
-          <div className="user-profile"><span className="user-avatar">DN</span><span><b>Deepesh Navani</b><small>Workspace owner</small></span><span className="more">···</span></div>
-        </div>
+        <div className="sidebar-bottom"><span className="sidebar-note">Catalog prices are estimates, not your negotiated rates or bill.</span><span className="sidebar-version">CloudOptima · GCP + Azure</span></div>
       </aside>
       <main className="main-area">
-        <header className="topbar"><div className="breadcrumbs">Workspace <span>/</span> <b>{page}</b></div><div className="top-actions"><span className={`mode-pill ${serviceStatus.mode === 'demo' ? 'demo' : ''}`}><i />Demo mode</span><button className="icon-button" aria-label="Notifications" onClick={() => notify('You’re all caught up.')}>♧<i className="notification-dot" /></button><span className="top-avatar">DN</span></div></header>
-        <div className="content">
-          {page === 'Dashboard' && <Dashboard pricing={pricing} migrations={migrations} analysis={analysis} recommendation={recommendation} currentProvider={calculator.current_provider} recommended={recommended} setPage={setPage} />}
-          {page === 'Cloud pricing' && <PricingPage pricing={pricing} busy={pricingBusy} refresh={refreshPricing} />}
-          {page === 'Cost calculator' && <CalculatorPage calculator={calculator} setCalculator={setCalculator} calculate={calculate} analysis={analysis} formError={formError} />}
-          {page === 'Decision engine' && <DecisionPage calculator={calculator} setCalculator={setCalculator} run={recommend} result={recommendation} createMigration={createMigration} />}
-          {page === 'Migration center' && <MigrationPage migrations={migrations} advance={advanceMigration} cancel={cancelMigration} create={createMigration} healthCheckPassed={healthCheckPassed} setHealthCheckPassed={setHealthCheckPassed} />}
-          {page === 'Analytics' && <AnalyticsPage pricing={pricing} migrations={migrations} analysis={analysis} />}
-          {page === 'Settings' && <SettingsPage status={serviceStatus} />}
-          <footer className="footer"><span>© {new Date().getFullYear()} CloudOptima</span><span>Cost intelligence for the multi-cloud era <i>•</i> Costs use your entered assumptions</span></footer>
-        </div>
+        <header className="topbar">
+          <div className="breadcrumbs">Workspace <span>/</span> <b>{page}</b></div>
+          <div className="top-actions">
+            <span className={`mode-pill ${status.mode === 'demo' ? 'demo' : ''}`}><i />{status.mode === 'demo' ? 'Demo-safe mode' : 'Live catalog mode'}</span>
+            <button className="button secondary compact" onClick={loadData} disabled={loading}>{loading ? 'Loading…' : '↻ Sync status'}</button>
+          </div>
+        </header>
+        <section className="content">
+          {error && <div className="alert error-alert" role="alert"><span>{error}</span><button onClick={() => setError('')} aria-label="Dismiss error">×</button></div>}
+          {page === 'Overview' && <OverviewPage
+            pricing={pricing} status={status} migrations={migrations} analyses={history.items || []}
+            savedSavings={savedSavings} latestFetch={latestFetch} loading={loading}
+            refresh={refreshPricing} busy={pricingBusy} navigate={setPage}
+          />}
+          {page === 'Cloud pricing' && <PricingPage
+            pricing={pricing} status={status.pricing || { providers: {} }} busy={pricingBusy}
+            refresh={refreshPricing} region={region} setRegion={setRegion} error={error}
+          />}
+          {page === 'Cost calculator' && <CalculatorPage
+            cost={cost} setCost={setCost} calculate={calculate} analysis={analysis} pricing={pricing} history={history.items || []}
+          />}
+          {page === 'Best cloud decision' && <DecisionPage
+            inputs={decisionInputs} setInputs={setDecisionInputs} run={runDecision} result={decision}
+            pricing={pricing} prepareMigration={prepareMigration}
+          />}
+          {page === 'Migration center' && <MigrationPage
+            migrations={migrations} inputs={migrationInputs} setInputs={setMigrationInputs}
+            create={createMigration} advance={advanceMigration} cancel={cancelMigration}
+            healthCheckPassed={healthCheckPassed} setHealthCheckPassed={setHealthCheckPassed}
+          />}
+          {page === 'Analytics & history' && <AnalyticsPage
+            pricing={pricing} history={history} migrations={migrations} savedSavings={savedSavings}
+          />}
+          {page === 'Settings' && <SettingsPage status={status} refresh={refreshPricing} busy={pricingBusy} />}
+        </section>
+        <footer className="footer"><span>© {new Date().getFullYear()} CloudOptima</span><span>Provider retail catalogs · estimates only · migration simulations</span></footer>
       </main>
-      {toast && <div className="toast" role="status"><span>✓</span>{toast}<button onClick={() => setToast('')} aria-label="Dismiss notification">×</button></div>}
+      {toast && <div className="toast" role="status">{toast}<button onClick={() => setToast('')} aria-label="Dismiss notification">×</button></div>}
     </div>
   )
 }
@@ -287,151 +307,264 @@ function PageHeader({ eyebrow, title, subtitle, action }) {
   return <div className="page-header"><div><div className="eyebrow">{eyebrow}</div><h1>{title}</h1><p>{subtitle}</p></div>{action}</div>
 }
 
-function Dashboard({ pricing, migrations, analysis, recommendation, currentProvider, recommended, setPage }) {
-  const savings = analysis?.net_savings ?? recommendation?.estimated_net_savings
-  const savingsPercent = analysis?.savings_percent ?? recommendation?.savings_percent
-  const stayingOnCurrent = recommended === currentProvider
+function OverviewPage({ pricing, status, migrations, analyses, savedSavings, latestFetch, loading, refresh, busy, navigate }) {
+  const fresh = pricing.filter((item) => item.freshness === 'fresh').length
+  const connected = Object.values(status.pricing?.providers || {}).filter((provider) => provider.status === 'connected' || provider.status === 'cached').length
+  const priced = pricing.filter((item) => item.hourly_price != null).length
+  const latest = pricing.slice(0, 6)
   return <>
-    <PageHeader eyebrow={new Intl.DateTimeFormat('en-US', { dateStyle: 'full' }).format(new Date()).toUpperCase()} title="Welcome, Deepesh" subtitle="Your cloud cost workspace is ready." action={<button className="button secondary" onClick={() => setPage('Cloud pricing')}>↻ <span>Check pricing status</span></button>} />
-    <div className="notice"><span className="notice-icon">i</span><span><b>No provider pricing is configured.</b> Live prices are unavailable, so no cost or migration recommendation is being fabricated. <button onClick={() => setPage('Settings')}>View integration status →</button></span></div>
-    <section className="metric-grid">
-      <MetricCard label="Pricing records" value={String(pricing.length)} delta="No live pricing source configured" icon="$" color="violet" />
-      <MetricCard label="Estimated net savings" value={savings == null ? '—' : money(savings)} delta={savings == null ? 'Run a cost calculation' : `${savingsPercent.toFixed(1)}% vs. current`} icon="↘" color="green" />
-      <MetricCard label="Decision status" value={recommended ? (stayingOnCurrent ? `Stay on ${currentProvider}` : `Move to ${recommended}`) : 'Not evaluated'} delta={recommendation?.reason || 'No provider prices available'} icon="✳" color="blue" provider={recommended} />
-      <MetricCard label="Active migrations" value={String(migrations.filter((item) => !['COMPLETED', 'FAILED', 'CANCELLED'].includes(item.state)).length).padStart(2, '0')} delta={`${migrations.length} total operations`} icon="⇄" color="orange" />
-    </section>
-    <section className="dashboard-grid">
-      <div className="panel cost-panel"><div className="panel-heading"><div><h2>Provider cost comparison</h2><p>Available records · no sample prices</p></div><button className="select-like" onClick={() => setPage('Cloud pricing')}>Pricing status <span>→</span></button></div><CostChart pricing={pricing} /><div className="chart-legend">{pricing.map((item) => <span key={item.provider}><i style={{ background: providerColor[item.provider] }} />{item.provider}<b>{shortMoney(item.hourly_price)}/hr</b></span>)}</div></div>
-      <div className="panel recommendation-card"><div className="recommendation-top"><span className="sparkle">✳</span><span className="recommendation-tag">DECISION STATUS</span></div><h2>{recommendation ? (stayingOnCurrent ? `Stay on ${currentProvider} for now` : `${recommended} is the lowest eligible target`) : 'No recommendation yet'}</h2><p>{recommendation?.reason || 'Connect a supported pricing source and enter your workload requirements to evaluate providers.'}</p>{savings == null ? <div className="saving-highlight"><div><small>ESTIMATED NET SAVINGS</small><strong>—</strong></div><span className="saving-badge neutral">Unavailable</span></div> : <div className="saving-highlight"><div><small>ESTIMATED NET SAVINGS</small><strong>{money(savings)}<em> / period</em></strong></div><span className={`saving-badge ${stayingOnCurrent ? 'neutral' : savings < 0 ? 'negative' : ''}`}>{stayingOnCurrent ? 'Stay put' : `↘ ${savingsPercent.toFixed(1)}%`}</span></div>}<button className="button primary full" onClick={() => setPage('Decision engine')}>Review decision engine <span>→</span></button><div className="recommendation-foot">No cloud operations are enabled</div></div>
-    </section>
-    <section className="dashboard-grid lower-grid">
-      <div className="panel table-panel"><div className="panel-heading"><div><h2>Latest pricing snapshot</h2><p>No records retrieved</p></div><button className="text-link" onClick={() => setPage('Cloud pricing')}>Pricing settings <span>→</span></button></div><PriceTable pricing={pricing.slice(0, 3)} compact /></div>
-      <div className="panel activity-panel"><div className="panel-heading"><div><h2>Recent activity</h2><p>Your latest migration operations</p></div><button className="icon-button subtle" onClick={() => setPage('Migration center')}>↗</button></div>{migrations.length ? migrations.slice(0, 3).map((item) => <div className="activity-row" key={item.migration_id}><span className={`activity-icon ${item.state === 'COMPLETED' ? 'success' : 'pending'}`}>{item.state === 'COMPLETED' ? '✓' : '⇄'}</span><span><b>{item.source_provider} → {item.target_provider}</b><small>{item.simulation ? 'Simulated migration' : 'Migration operation'} · {displayDate(item.updated_at || item.created_at)}</small></span><StateBadge state={item.state} /></div>) : <EmptyState title="No migrations yet" text="Safe workload simulations will appear here." />}</div>
-    </section>
-  </>
-}
-
-function MetricCard({ label, value, delta, icon, color, provider }) {
-  return <div className="metric-card"><div className={`metric-icon ${color}`}>{provider ? <i style={{ background: providerColor[provider] }} /> : icon}</div><div className="metric-label">{label}</div><div className="metric-value">{value}</div><div className="metric-delta">{delta}</div></div>
-}
-
-function CostChart({ pricing }) {
-  if (!pricing.length) return <EmptyState title="No price records available" text="Live pricing adapters are not configured, so there is no provider comparison to chart." />
-  const bars = pricing.slice(0, 3)
-  const max = Math.max(...bars.map((item) => item.hourly_price), 0.05)
-  return <div className="cost-chart"><div className="chart-y-labels"><span>$0.05</span><span>$0.04</span><span>$0.03</span><span>$0.02</span><span>$0.01</span></div><div className="chart-plot"><div className="chart-gridlines"><i /><i /><i /><i /><i /></div><div className="bar-group">{bars.map((item) => <div className="bar-column" key={item.provider}><div className="bar-value">{shortMoney(item.hourly_price)}</div><div className="bar" style={{ height: `${Math.max(18, item.hourly_price / max * 76)}%`, background: providerColor[item.provider] }} /><span>{item.provider}</span></div>)}</div><div className="chart-axis"><span>Sample pricing</span><span>Hourly estimate · USD</span></div></div></div>
-}
-
-function PricingPage({ pricing, busy, refresh }) {
-  return <>
-    <PageHeader eyebrow="PRICE TELEMETRY" title="Cloud pricing" subtitle="Compare spot and preemptible compute across providers." action={<button className="button primary" onClick={refresh} disabled={busy}>{busy ? <span className="spinner" /> : '↻'} {busy ? 'Refreshing…' : 'Check pricing'}</button>} />
-    <div className="notice"><span className="notice-icon">!</span><span><b>Pricing unavailable.</b> Provider pricing adapters are not configured. The application will not substitute fabricated prices.</span></div>
-    {pricing.length > 0 && <div className="pricing-summary">{pricing.map((item) => <div className="provider-price-card" key={`${item.provider}-${item.region}-${item.instance_type}`}><div className="provider-title"><i style={{ background: providerColor[item.provider] }} /><b>{item.provider}</b></div><strong>{shortMoney(item.hourly_price)}<small>/ hr</small></strong><div className="provider-card-foot">{item.instance_type}<span>{item.vcpu} vCPU · {item.memory_gb} GB</span></div></div>)}</div>}
-    <div className="panel table-panel full-panel"><div className="panel-heading"><div><h2>Normalized price records</h2><p>Common schema · USD per instance-hour</p></div><span className="update-label"><i />{pricing.length ? 'Provider source' : 'No source connected'}</span></div><PriceTable pricing={pricing} /></div>
-    <div className="info-banner"><span>ⓘ</span><div><b>Provider adapters are not connected</b><p>Checking pricing currently reports adapter status only. No API calls or price records are produced until a provider integration is implemented and configured.</p></div></div>
-  </>
-}
-
-function PriceTable({ pricing, compact = false }) {
-  const rows = pricing.map((item) => (
-    <tr key={`${item.provider}-${item.region}-${item.instance_type}`}>
-      <td><span className="provider-cell"><i style={{ background: providerColor[item.provider] }} />{item.provider}</span></td>
-      <td>{item.region}</td>
-      <td><code>{item.instance_type}</code></td>
-      <td>{item.vcpu} vCPU · {item.memory_gb} GB</td>
-      <td className="price-cell">{shortMoney(item.hourly_price)}</td>
-      <td><span className="type-pill">{item.pricing_type}</span></td>
-      {!compact && <td><span className="source-cell">{item.source} <i className="fresh-dot" />{item.freshness}</span></td>}
-    </tr>
-  ))
-  return (
-    <div className="table-wrap">
-      <table>
-        <thead><tr><th>PROVIDER</th><th>REGION</th><th>INSTANCE</th><th>VCPU / RAM</th><th>HOURLY PRICE</th><th>PRICING TYPE</th>{!compact && <th>SOURCE / FRESHNESS</th>}</tr></thead>
-        <tbody>{rows.length ? rows : <tr><td className="table-empty" colSpan={compact ? 6 : 7}>No price records available. Connect a provider integration to populate this table.</td></tr>}</tbody>
-      </table>
+    <PageHeader eyebrow="CLOUD COST OPERATIONS" title="Overview" subtitle="A clear view of catalog coverage, price freshness, and estimated savings." action={<button className="button primary" onClick={refresh} disabled={busy}>{busy ? 'Refreshing…' : '↻ Refresh pricing'}</button>} />
+    {connected < 2 && <div className="alert warning-alert"><b>Provider coverage is partial.</b><span>Check GCP and Azure connection states. No catalog price is treated as a negotiated rate or deployed-resource cost.</span><button className="text-button" onClick={() => navigate('Settings')}>View settings →</button></div>}
+    <div className="metric-grid">
+      <Metric label="Catalog records" value={loading ? '…' : pricing.length} detail={`${priced} with supported hourly rates`} icon="◈" tone="blue" />
+      <Metric label="Fresh records" value={loading ? '…' : `${fresh} / ${pricing.length}`} detail="Observed in the last 24 hours" icon="◷" tone="green" />
+      <Metric label="Saved estimated savings" value={formatMoney(savedSavings, 2)} detail={`${analyses.length} saved calculations · estimates only`} icon="↘" tone="purple" />
+      <Metric label="Migration simulations" value={migrations.length} detail={`${migrations.filter((item) => !terminalStates.includes(item.state)).length} in progress`} icon="⇄" tone="orange" />
     </div>
-  )
-}
-
-function CalculatorPage({ calculator, setCalculator, calculate, analysis, formError }) {
-  const update = (key) => (event) => setCalculator((previous) => ({ ...previous, [key]: event.target.value }))
-  return <>
-    <PageHeader eyebrow="COST MODEL" title="Cost calculator" subtitle="Enter real provider prices or an explicit classroom scenario. No prices are prefilled." />
-    <form onSubmit={calculate} className="calculator-layout">
-      <div className="panel form-panel"><h2>Workload assumptions</h2><p className="panel-subtitle">All amounts are USD. These values are supplied by you; no cloud resources are created.</p><div className="form-grid">
-        <Field label="Current provider"><select value={calculator.current_provider} onChange={update('current_provider')}><Options /></select></Field>
-        <Field label="Target provider"><select value={calculator.target_provider} onChange={update('target_provider')}><Options /></select></Field>
-        <Field label="Current hourly compute cost" prefix="$"><input type="number" min="0" step="0.0001" value={calculator.current_hourly_cost} onChange={update('current_hourly_cost')} required /></Field>
-        <Field label="Target hourly compute cost" prefix="$"><input type="number" min="0" step="0.0001" value={calculator.target_hourly_cost} onChange={update('target_hourly_cost')} required /></Field>
-        <Field label="Workload duration" suffix="hours"><input type="number" min="0.01" step="any" value={calculator.duration_hours} onChange={update('duration_hours')} required /></Field>
-        <Field label="Data transfer / egress" prefix="$"><input type="number" min="0" step="0.01" value={calculator.transfer_cost} onChange={update('transfer_cost')} required /></Field>
-        <Field label="Migration overhead" prefix="$"><input type="number" min="0" step="0.01" value={calculator.migration_overhead} onChange={update('migration_overhead')} required /></Field>
-        <Field label="Other estimated costs" prefix="$"><input type="number" min="0" step="0.01" value={calculator.other_costs} onChange={update('other_costs')} required /></Field>
-        <Field label="Minimum savings threshold" suffix="%"><input type="number" min="0" max="100" step="1" value={calculator.minimum_savings_percent} onChange={update('minimum_savings_percent')} required /></Field>
-      </div><div className="assumption-note"><span>ⓘ</span> Estimates use one-time transfer and migration costs. They are added once and are not multiplied by workload duration.</div><button className="button primary" type="submit">Calculate estimate <span>→</span></button>{formError && <p className="form-error" role="alert">{formError}</p>}</div>
-      <CostResult analysis={analysis} />
-    </form>
+    <div className="dashboard-grid">
+      <section className="panel">
+        <div className="panel-heading"><div><h2>Verified hourly catalog prices</h2><p>Supported hourly rates from stored catalog snapshots · USD only</p></div><button className="text-button" onClick={() => navigate('Cloud pricing')}>Explore prices →</button></div>
+        <PriceBars items={pricing.filter((item) => item.hourly_price != null && item.currency === 'USD' && item.pricing_model_status === 'verified').slice(0, 8)} />
+      </section>
+      <section className="panel">
+        <div className="panel-heading"><div><h2>Integration health</h2><p>Backend configuration, not credential disclosure</p></div><button className="text-button" onClick={() => navigate('Settings')}>Details →</button></div>
+        <ProviderStatusRows providers={status.pricing?.providers || {}} />
+        <div className="last-refresh"><span>Last successful refresh</span><b>{formatDate(latestFetch)}</b></div>
+      </section>
+    </div>
+    <section className="panel table-panel">
+      <div className="panel-heading"><div><h2>Latest pricing observations</h2><p>{latest.length ? 'Catalog records with their source and observed time' : 'No stored catalog records yet'}</p></div><button className="text-button" onClick={() => navigate('Cloud pricing')}>View all →</button></div>
+      <PriceTable items={latest} compact />
+    </section>
+    <div className="dashboard-grid lower-grid">
+      <section className="panel"><div className="panel-heading"><div><h2>Recent estimates</h2><p>Saved calculations from this workspace</p></div><button className="text-button" onClick={() => navigate('Analytics & history')}>History →</button></div>
+        {(analyses || []).length ? <div className="compact-list">{analyses.slice(0, 4).map((item, index) => <div className="compact-row" key={item.created_at || index}><span><b>{item.current_provider} → {item.target_provider}</b><small>{formatDate(item.created_at)}</small></span><strong>{formatMoney(item.net_savings, 2)}</strong></div>)}</div> : <EmptyState title="No saved estimates" text="Run a cost calculation to start a real workspace history." />}
+      </section>
+      <section className="panel"><div className="panel-heading"><div><h2>Simulation activity</h2><p>Simulations only · no cloud resource changes</p></div><button className="text-button" onClick={() => navigate('Migration center')}>Open center →</button></div>
+        {migrations.length ? migrations.slice(0, 4).map((item) => <div className="compact-row" key={item.migration_id}><span><b>{item.source_provider} → {item.target_provider}</b><small>{item.workload_name} · {formatDate(item.updated_at || item.created_at)}</small></span><StatusBadge value={item.state} /></div>) : <EmptyState title="No simulations" text="Create a simulation to review the guarded workflow." />}
+      </section>
+    </div>
   </>
 }
 
-function Options() { return <><option>AWS</option><option>GCP</option><option>Azure</option></> }
-function Field({ label, prefix, suffix, children }) { return <label className="field"><span>{label}</span><div className="input-wrap">{prefix && <span>{prefix}</span>}{children}{suffix && <span>{suffix}</span>}</div></label> }
-
-function CostResult({ analysis }) {
-  if (!analysis) return <div className="panel result-panel empty-result"><div className="result-placeholder">⌗</div><h2>Your estimate will appear here</h2><p>Configure your workload assumptions and calculate to see an itemized cost breakdown.</p></div>
-  const rows = [['Current compute', analysis.current_cost], ['Target compute', analysis.target_compute_cost], ['Data transfer & egress', analysis.transfer_cost], ['Migration overhead', analysis.migration_overhead], ['Other costs', analysis.other_costs]]
-  return <div className="panel result-panel"><div className="result-heading"><div><span className="eyebrow">ESTIMATED OUTCOME</span><h2>Cost breakdown</h2></div><span className={`result-status ${analysis.net_savings >= 0 ? 'positive' : 'negative'}`}>{analysis.net_savings >= 0 ? 'Potential savings' : 'Higher total cost'}</span></div><div className="breakdown">{rows.map(([label, value]) => <div key={label}><span>{label}</span><b>{money(value)}</b></div>)}<div className="breakdown-total"><span>Target total cost</span><b>{money(analysis.target_total_cost)}</b></div></div><div className={`net-result ${analysis.net_savings >= 0 ? '' : 'loss'}`}><span>Net savings</span><strong>{money(analysis.net_savings)}</strong><small>{Number(analysis.savings_percent).toFixed(1)}% of current cost</small></div><div className="break-even"><span>Estimated break-even</span><b>{analysis.break_even_hours == null ? 'Not reached' : `${Number(analysis.break_even_hours).toFixed(1)} hours`}</b></div><p className="result-note">{analysis.note || 'Deterministic estimate. Actual prices, taxes, and transfer fees may differ.'}</p></div>
+function Metric({ label, value, detail, icon, tone }) {
+  return <article className="metric-card"><span className={`metric-icon ${tone}`}>{icon}</span><div className="metric-label">{label}</div><div className="metric-value">{value}</div><div className="metric-delta">{detail}</div></article>
 }
 
-function DecisionPage({ calculator, setCalculator, run, result, createMigration }) {
-  return <>
-    <PageHeader eyebrow="DETERMINISTIC ANALYSIS" title="Decision engine" subtitle="Rank candidates by total estimated cost, not hourly price alone." action={<button className="button primary" onClick={run}>✳ Run analysis</button>} />
-    <div className="decision-layout">        <div className="panel form-panel"><h2>Decision constraints</h2><p className="panel-subtitle">Candidates must satisfy workload capacity and minimum savings requirements.</p><Field label="Current provider"><select value={calculator.current_provider} onChange={(event) => setCalculator((old) => ({ ...old, current_provider: event.target.value }))}><Options /></select></Field><div className="form-grid"><Field label="Region"><div className="input-wrap"><input type="text" value={calculator.region} onChange={(event) => setCalculator((old) => ({ ...old, region: event.target.value }))} /></div></Field><Field label="Duration" suffix="hours"><input type="number" min="1" value={calculator.duration_hours} onChange={(event) => setCalculator((old) => ({ ...old, duration_hours: event.target.value }))} /></Field><Field label="Current hourly cost" prefix="$"><input type="number" min="0" step=".0001" value={calculator.current_hourly_cost} onChange={(event) => setCalculator((old) => ({ ...old, current_hourly_cost: event.target.value }))} /></Field><Field label="Required vCPU"><input type="number" min="1" value={calculator.required_vcpu} onChange={(event) => setCalculator((old) => ({ ...old, required_vcpu: event.target.value }))} /></Field><Field label="Required memory" suffix="GB"><input type="number" min="1" value={calculator.required_memory_gb} onChange={(event) => setCalculator((old) => ({ ...old, required_memory_gb: event.target.value }))} /></Field><Field label="Minimum savings" suffix="%"><input type="number" min="0" max="100" value={calculator.minimum_savings_percent} onChange={(event) => setCalculator((old) => ({ ...old, minimum_savings_percent: event.target.value }))} /></Field><Field label="Transfer + migration cost" prefix="$"><input type="number" min="0" value={Number(calculator.transfer_cost) + Number(calculator.migration_overhead)} onChange={(event) => setCalculator((old) => ({ ...old, transfer_cost: event.target.value, migration_overhead: 0 }))} /></Field></div><button className="button primary" onClick={run}>Evaluate providers <span>→</span></button></div>
-      <div className="panel decision-result">{result ? <><span className="eyebrow">RECOMMENDATION</span><div className="decision-provider"><span className="provider-logo" style={{ color: providerColor[result.recommended_provider] || '#73809a' }}>✳</span><div><small>{result.recommended_provider === calculator.current_provider ? 'STAY ON CURRENT PROVIDER' : 'BEST-FIT PROVIDER'}</small><h2>{result.recommended_provider}</h2></div><span className="sample-tag">DEMO MODE</span></div><p>{result.reason}</p><div className="saving-highlight"><div><small>EST. NET SAVINGS</small><strong>{result.estimated_net_savings == null ? '—' : money(result.estimated_net_savings)}{result.estimated_net_savings != null && <em> / period</em>}</strong></div><span className={`saving-badge ${result.estimated_net_savings == null || result.recommended_provider === calculator.current_provider ? 'neutral' : ''}`}>{result.estimated_net_savings == null ? 'No price data' : result.recommended_provider === calculator.current_provider ? 'Stay put' : `↘ ${Number(result.savings_percent || 0).toFixed(1)}%`}</span></div><h3>Ranked alternatives</h3>{result.candidates?.length ? result.candidates.map((candidate) => <div className="candidate-row" key={candidate.provider}><span><i style={{ background: providerColor[candidate.provider] }} />{candidate.provider}</span><b>{money(candidate.total_cost)}</b><small>{candidate.eligible ? 'Meets threshold.' : 'Below threshold.'} {candidate.reason}</small></div>) : <EmptyState title="No provider price records" text="No alternative can be evaluated until a real provider price source is connected." />}{result.recommended_provider !== calculator.current_provider && result.candidates?.length > 0 ? <button className="button secondary full" onClick={() => createMigration(result.recommended_provider)}>Create migration simulation <span>→</span></button> : <p className="result-note">No migration is recommended under the current pricing data.</p>}<p className="result-note">Regional availability, capacity and interruption risk are not validated by demo estimates.</p></> : <div className="empty-result"><div className="result-placeholder">✳</div><h2>Ready to evaluate</h2><p>Enter workload requirements and run analysis. Without provider prices, no target will be recommended.</p></div>}</div></div>
-  </>
+function PriceBars({ items }) {
+  const groups = useMemo(() => {
+    const values = providers.map((provider) => {
+      const rows = items.filter((item) => item.provider === provider)
+      return { provider, count: rows.length, average: rows.length ? rows.reduce((sum, item) => sum + item.hourly_price, 0) / rows.length : null }
+    })
+    const max = Math.max(...values.map((item) => item.average || 0), 0.0001)
+    return values.map((item) => ({ ...item, height: item.average == null ? 0 : Math.max(4, item.average / max * 100) }))
+  }, [items])
+  if (!items.length) return <EmptyState title="No comparable hourly prices yet" text="Refresh the provider catalogs. Unsupported units, currencies, and incomplete VM pricing remain clearly marked instead of being guessed." />
+  return <div className="price-chart" aria-label="Average verified catalog hourly price by provider">
+    {groups.map((group) => <div className="price-chart-column" key={group.provider}><div className="price-chart-value">{group.average == null ? 'No rows' : `${formatMoney(group.average, 5)}/h`}</div><div className="price-chart-track"><div style={{ height: `${group.height}%`, background: colors[group.provider] }} /></div><b>{group.provider}</b><small>{group.count} observations</small></div>)}
+    <p className="chart-footnote">Averages include only the visible verified hourly USD observations; catalog products may not be like-for-like.</p>
+  </div>
 }
 
-const stateLabels = { PENDING: 'Pending', PROVISIONING: 'Provisioning', DEPLOYING: 'Deploying', HEALTH_CHECK: 'Health check', READY_TO_SWITCH: 'Ready to switch', SWITCHING_TRAFFIC: 'Switching', VERIFYING: 'Verifying', COMPLETED: 'Completed', FAILED: 'Failed', CANCELLED: 'Cancelled' }
-function StateBadge({ state }) { return <span className={`state-badge ${['COMPLETED'].includes(state) ? 'complete' : ['FAILED', 'CANCELLED'].includes(state) ? 'failed' : 'running'}`}><i />{stateLabels[state] || state}</span> }
-
-function MigrationPage({ migrations, advance, cancel, create, healthCheckPassed, setHealthCheckPassed }) {
-  return <>
-    <PageHeader eyebrow="SAFE WORKLOAD OPERATIONS" title="Migration center" subtitle="Track step-by-step migration simulations. No real cloud operations are enabled." action={<button className="button primary" onClick={() => create('GCP')}>＋ New simulation</button>} />
-    <div className="notice"><span className="notice-icon">!</span><span><b>Simulation mode.</b> Advancing a migration changes only its recorded state. No compute, DNS, or cloud resources are provisioned or modified.</span></div>
-    <div className="migration-grid">{migrations.length ? migrations.map((migration) => <div className="panel migration-card" key={migration.migration_id}><div className="migration-card-head"><div><span className="eyebrow">MIGRATION · {migration.migration_id.slice(0, 12)}</span><h2>{migration.source_provider} <span>→</span> {migration.target_provider}</h2></div><StateBadge state={migration.state} /></div><div className="migration-meta"><span>Created <b>{displayDate(migration.created_at)}</b></span><span className="sim-label">◉ Simulated</span></div><MigrationTimeline migration={migration} /><div className="migration-controls"><label className="check-control"><input type="checkbox" checked={healthCheckPassed} onChange={(event) => setHealthCheckPassed(event.target.checked)} /> Health check passes</label><div>{!['COMPLETED', 'FAILED', 'CANCELLED'].includes(migration.state) && <><button className="button secondary small" onClick={() => cancel(migration)}>Cancel</button><button className="button primary small" onClick={() => advance(migration)}>Advance step →</button></>}</div></div>{migration.error && <p className="form-error">{migration.error}</p>}</div>) : <div className="panel migration-empty"><EmptyState title="No migrations to show" text="Start a safe simulation to explore the migration workflow." /><button className="button primary" onClick={() => create('GCP')}>＋ Create simulation</button></div>}</div>
-  </>
-}
-
-function MigrationTimeline({ migration }) {
-  const steps = ['PENDING', 'PROVISIONING', 'DEPLOYING', 'HEALTH_CHECK', 'READY_TO_SWITCH', 'SWITCHING_TRAFFIC', 'VERIFYING', 'COMPLETED']
-  const currentIndex = steps.indexOf(migration.state)
-  const history = migration.history || []
-  return <div className="timeline">{steps.map((step, index) => {
-    const event = history.find((entry) => entry.state === step)
-    const done = currentIndex >= index
-    return <div key={step} className={`timeline-step ${done ? 'done' : ''} ${migration.state === 'FAILED' && index >= currentIndex ? 'error' : ''}`}><span className="timeline-marker">{migration.state === 'FAILED' && index === currentIndex ? '!' : done ? '✓' : index + 1}</span><div><b>{stateLabels[step]}</b>{event && <small>{displayDate(event.at || event.timestamp)}</small>}</div></div>
+function ProviderStatusRows({ providers: providerStatuses }) {
+  return <div className="provider-status-list">{providers.map((provider) => {
+    const state = providerStatuses[provider] || {}
+    return <div className="provider-status-row" key={provider}><span className={`provider-dot ${provider.toLowerCase()}`} /><span className="provider-status-name"><b>{provider === 'GCP' ? 'Google Cloud' : 'Microsoft Azure'}</b><small>{state.error || `Last success: ${formatDate(state.last_successful_fetch_at)}`}</small></span><StatusBadge value={state.status || 'unknown'} /></div>
   })}</div>
 }
 
-function AnalyticsPage({ pricing, migrations, analysis }) {
-  const completed = migrations.filter((item) => item.state === 'COMPLETED').length
-  const failed = migrations.filter((item) => item.state === 'FAILED').length
+function StatusBadge({ value }) {
+  const label = String(value || 'unknown').replaceAll('_', ' ')
+  const state = ['connected', 'cached', 'completed'].includes(String(value).toLowerCase()) ? 'success' : ['error', 'failed'].includes(String(value).toLowerCase()) ? 'danger' : 'neutral'
+  return <span className={`status-badge ${state}`}>{label}</span>
+}
+
+function PricingPage({ pricing, status, busy, refresh, region, setRegion }) {
+  const [provider, setProvider] = useState('All')
+  const [model, setModel] = useState('All')
+  const [search, setSearch] = useState('')
+  const [freshness, setFreshness] = useState('All')
+  const regions = [...new Set(pricing.map((item) => item.region).filter((value) => value && value !== 'unknown'))].sort()
+  const rows = pricing.filter((item) => (provider === 'All' || item.provider === provider)
+    && (model === 'All' || item.pricing_type === model)
+    && (freshness === 'All' || item.freshness === freshness.toLowerCase())
+    && (!search || `${item.instance_type} ${item.sku_id || ''} ${item.product_id || ''} ${item.meter_name || ''}`.toLowerCase().includes(search.toLowerCase()))
+    && (!region || item.region.toLowerCase().includes(region.toLowerCase())))
   return <>
-    <PageHeader eyebrow="HISTORICAL INSIGHTS" title="Analytics" subtitle="Understand estimated cloud costs and migration outcomes." action={<button className="button secondary" onClick={() => window.print()}>⇩ Export report</button>} />
-    <div className="metric-grid analytics-metrics"><MetricCard label="Estimated savings" value={analysis ? money(analysis.net_savings) : '—'} delta={analysis ? 'Latest user calculation' : 'No calculation yet'} icon="↘" color="green" /><MetricCard label="Migrations completed" value={String(completed)} delta={`${failed} failed · simulation only`} icon="✓" color="blue" /><MetricCard label="Providers with prices" value={String(new Set(pricing.map((item) => item.provider)).size)} delta="Connected pricing records" icon="◈" color="violet" /><MetricCard label="Pricing records" value={String(pricing.length)} delta="Retrieved from configured sources" icon="$" color="orange" /></div>
-    <div className="dashboard-grid analytics-grid"><div className="panel cost-panel"><div className="panel-heading"><div><h2>Hourly provider comparison</h2><p>Only retrieved provider price records are shown.</p></div></div><CostChart pricing={pricing} /><div className="chart-legend">{pricing.map((item) => <span key={item.provider}><i style={{ background: providerColor[item.provider] }} />{item.provider}<b>{shortMoney(item.hourly_price)}/hr</b></span>)}</div></div><div className="panel analytics-notes"><div className="panel-heading"><div><h2>Data quality</h2><p>Inputs for current analysis</p></div></div>{pricing.length ? pricing.map((item) => <div className="quality-row" key={item.provider}><span><i style={{ background: providerColor[item.provider] }} />{item.provider}</span><b>{item.source}</b><small>{item.freshness} · {item.availability_evidence}</small></div>) : <EmptyState title="No pricing data" text="Analytics will use actual provider records after an integration is configured." />}<div className="info-banner"><span>ⓘ</span><div><b>No historical provider feed</b><p>Historical pricing is empty until a real adapter retrieves and stores timestamped provider prices.</p></div></div></div></div>
+    <PageHeader eyebrow="PRICE TELEMETRY" title="Cloud pricing explorer" subtitle="Inspect provider catalog evidence, pricing model, units, and freshness." action={<button className="button primary" onClick={refresh} disabled={busy}>{busy ? 'Refreshing…' : '↻ Refresh catalogs'}</button>} />
+    <div className="alert info-alert"><b>Public retail catalog data.</b><span>Rates are not negotiated contract prices, actual bills, or guarantees of deployed capacity. Incomplete or unsupported rows are retained with their limitations visible.</span></div>
+    <div className="filter-bar">
+      <label className="search-field"><span>Search catalog</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="SKU, product, or meter" /></label>
+      <Filter label="Provider" value={provider} onChange={setProvider} values={['All', ...providers]} />
+      <Filter label="Pricing model" value={model} onChange={setModel} values={['All', 'Spot', 'OnDemand', 'Unclassified']} />
+      <Filter label="Freshness" value={freshness} onChange={setFreshness} values={['All', 'Fresh', 'Stale']} />
+      <Filter label="Region" value={region} onChange={setRegion} values={['', ...regions]} emptyLabel="All regions" />
+    </div>
+    <div className="provider-inline-status"><ProviderStatusRows providers={status.providers || {}} /></div>
+    <section className="panel table-panel">
+      <div className="panel-heading"><div><h2>Normalized catalog records</h2><p>{rows.length} shown · source timestamps and SKU identity preserved</p></div><span className="data-label">LIVE CATALOG SNAPSHOTS</span></div>
+      <PriceTable items={rows} />
+    </section>
   </>
 }
 
-function SettingsPage({ status }) {
+function Filter({ label, value, onChange, values, emptyLabel }) {
+  return <label className="filter-field"><span>{label}</span><select value={value} onChange={(event) => onChange(event.target.value)}>{values.map((item) => <option key={item || 'all'} value={item}>{item || emptyLabel || 'All'}</option>)}</select></label>
+}
+
+function PriceTable({ items, compact = false }) {
+  return <div className="table-wrap"><table>
+    <thead><tr><th>PROVIDER</th><th>REGION</th><th>SKU / PRODUCT</th><th>CAPACITY</th><th>PRICING MODEL</th><th>HOURLY PRICE</th>{!compact && <><th>CURRENCY / UNIT</th><th>SOURCE / FRESHNESS</th></>}</tr></thead>
+    <tbody>{items.length ? items.map((item, index) => <tr key={item.snapshot_id || `${item.provider}-${item.sku_id}-${item.region}-${index}`}>
+      <td><span className="provider-cell"><i style={{ background: colors[item.provider] }} />{item.provider}</span></td>
+      <td>{item.region}</td>
+      <td className="sku-cell"><b>{item.instance_type || item.sku_id || 'Catalog item'}</b><small>{item.sku_id || 'SKU not provided'}{item.arm_sku_name ? ` · ${item.arm_sku_name}` : ''}{item.meter_id ? ` · meter ${item.meter_id}` : ''}{item.meter_name ? ` · ${item.meter_name}` : ''}</small></td>
+      <td>{item.specifications_complete ? `${item.vcpu} vCPU · ${item.memory_gb} GB` : <span className="muted">Specs unavailable</span>}</td>
+      <td><span className={`type-pill ${item.pricing_type === 'Spot' ? 'spot' : ''}`}>{item.pricing_type}</span><small className="table-subline">{item.pricing_model_status}</small></td>
+      <td className="price-cell">{formatMoney(item.hourly_price, 5, item.currency)}{item.hourly_price != null && <small className="table-subline">per instance-hour</small>}</td>
+      {!compact && <><td>{item.currency || 'Unknown'}<small className="table-subline">{item.native_unit || 'Unit not stated'}</small></td><td><span className="source-cell">{item.source}</span><small className="table-subline">{formatDate(item.fetched_at || item.observed_at)} · {item.freshness}</small></td></>}
+    </tr>) : <tr><td className="table-empty" colSpan={compact ? 6 : 8}>No catalog records match these filters. Refresh the catalogs or adjust your filters.</td></tr>}</tbody>
+  </table></div>
+}
+
+function CalculatorPage({ cost, setCost, calculate, analysis, pricing, history }) {
+  const candidates = pricing.filter((item) => item.hourly_price != null && item.currency === 'USD' && item.pricing_model_status === 'verified')
+  const update = (key) => (event) => setCost((current) => ({
+    ...current,
+    [key]: event.target.value,
+    ...(['target_provider', 'target_hourly_cost'].includes(key) ? { pricing_snapshot_id: '' } : {}),
+  }))
+  const pickCandidate = (event) => {
+    const candidate = candidates[Number(event.target.value)]
+    if (!candidate) return
+    setCost((current) => ({
+      ...current,
+      target_provider: candidate.provider,
+      target_hourly_cost: String(candidate.hourly_price),
+      pricing_snapshot_id: candidate.snapshot_id || '',
+    }))
+  }
   return <>
-    <PageHeader eyebrow="WORKSPACE CONFIGURATION" title="Settings" subtitle="Review application mode, connectivity, and estimate assumptions." />
-    <div className="settings-grid"><div className="panel settings-panel"><div className="panel-heading"><div><h2>Integrations & status</h2><p>Server-side credentials are never shown in the browser.</p></div></div><StatusRow name="Application mode" value="Demo" tone="demo" detail="No live cloud operations enabled" /><StatusRow name="Backend API" value={status.database === 'checking' ? 'Checking' : status.database === 'error' ? 'Request error' : status.database === 'unavailable' ? 'Unavailable' : 'Connected'} tone={['unavailable', 'error'].includes(status.database) ? 'warning' : 'healthy'} detail={status.database === 'unavailable' ? 'Start FastAPI to connect; browser displays no fabricated prices.' : status.database === 'error' ? 'FastAPI responded with an error; check its logs.' : 'FastAPI status endpoint responded.'} /><StatusRow name="MongoDB persistence" value={status.persistence} tone={status.persistence === 'mongodb' ? 'healthy' : 'warning'} detail={status.persistence === 'mongodb' ? 'Records persist in the configured database.' : 'Not connected; API reports memory-only persistence explicitly.'} /><StatusRow name="AWS / GCP / Azure pricing" value="Unavailable" tone="warning" detail="Live spot pricing adapters are not implemented or configured." /><StatusRow name="Cloud provisioning" value="Disabled" tone="warning" detail="No resources can be created or terminated in this build." /><StatusRow name="DNS failover" value="Mock only" tone="demo" detail="No real DNS endpoint or credentials are configured." /></div><div className="panel settings-panel"><div className="panel-heading"><div><h2>Cost model assumptions</h2><p>Enter real quotes or a clearly labeled classroom scenario.</p></div></div><div className="settings-assumption"><span>Currency</span><b>USD</b></div><div className="settings-assumption"><span>Compute unit</span><b>Per instance-hour</b></div><div className="settings-assumption"><span>Workload duration</span><b>Entered by user</b></div><div className="settings-assumption"><span>Transfer / migration costs</span><b>Entered by user, added once</b></div><div className="info-banner"><span>ⓘ</span><div><b>Configuration via backend environment</b><p>Set MONGODB_URI and FRONTEND_ORIGIN in backend/.env. Provider adapters are not included. Never put secrets in VITE_ variables.</p></div></div></div></div>
+    <PageHeader eyebrow="DETERMINISTIC ESTIMATE" title="Cost calculator" subtitle="Calculate a workload estimate from your inputs and optional catalog rate evidence." />
+    <div className="calculator-layout">
+      <form onSubmit={calculate} className="panel form-panel">
+        <div className="panel-heading"><div><h2>Workload assumptions</h2><p>Values are estimates supplied by you unless selected from catalog evidence.</p></div></div>
+        {candidates.length > 0 && <label className="field candidate-select"><span>Use a verified catalog observation (optional)</span><select defaultValue="" onChange={pickCandidate}><option value="">Choose a catalog rate</option>{candidates.map((item, index) => <option key={`${item.provider}-${item.sku_id}-${index}`} value={index}>{item.provider} · {item.pricing_type} · {item.instance_type} · {formatMoney(item.hourly_price, 5)}</option>)}</select></label>}
+        <div className="form-grid">
+          <Field label="Current provider"><select value={cost.current_provider} onChange={update('current_provider')}><ProviderOptions /></select></Field>
+          <Field label="Target provider"><select value={cost.target_provider} onChange={update('target_provider')}><ProviderOptions /></select></Field>
+          <Field label="Current hourly compute cost" prefix="$"><input type="number" min="0" step="any" value={cost.current_hourly_cost} onChange={update('current_hourly_cost')} required /></Field>
+          <Field label="Target hourly compute cost" prefix="$"><input type="number" min="0" step="any" value={cost.target_hourly_cost} onChange={update('target_hourly_cost')} required /></Field>
+          <Field label="Workload duration" suffix="hours"><input type="number" min="0.01" step="any" value={cost.duration_hours} onChange={update('duration_hours')} required /></Field>
+          <Field label="Transfer / egress estimate" prefix="$"><input type="number" min="0" step="any" value={cost.transfer_cost} onChange={update('transfer_cost')} required /></Field>
+          <Field label="Migration overhead estimate" prefix="$"><input type="number" min="0" step="any" value={cost.migration_overhead} onChange={update('migration_overhead')} required /></Field>
+          <Field label="Other user-estimated costs" prefix="$"><input type="number" min="0" step="any" value={cost.other_costs} onChange={update('other_costs')} required /></Field>
+          <Field label="Minimum savings threshold" suffix="%"><input type="number" min="0" max="100" step="any" value={cost.minimum_savings_percent} onChange={update('minimum_savings_percent')} required /></Field>
+        </div>
+        <p className="assumption-note">Transfer, migration, and other costs are added once. Taxes, discounts, storage, support, and licensing are excluded unless included in your own estimates.</p>
+        <button className="button primary" type="submit">Save cost estimate →</button>
+      </form>
+      <CostResult analysis={analysis} />
+    </div>
+    <section className="panel table-panel history-panel"><div className="panel-heading"><div><h2>Saved cost estimates</h2><p>{history.length} saved in current persistence mode</p></div></div><AnalysisTable items={history} /></section>
   </>
 }
 
-function StatusRow({ name, value, tone, detail }) { return <div className="status-row"><div><b>{name}</b><small>{detail}</small></div><span className={`status-label ${tone}`}><i />{value}</span></div> }
+function ProviderOptions() { return providers.map((provider) => <option key={provider} value={provider}>{provider}</option>) }
+function Field({ label, prefix, suffix, children }) { return <label className="field"><span>{label}</span><div className="input-wrap">{prefix && <span>{prefix}</span>}{children}{suffix && <span>{suffix}</span>}</div></label> }
+
+function CostResult({ analysis }) {
+  if (!analysis) return <section className="panel result-panel empty-result"><span className="result-placeholder">⌗</span><h2>Your estimate appears here</h2><p>Submit the assumptions to see the full cost breakdown and save the result.</p></section>
+  const rows = [['Current compute', analysis.current_cost], ['Target compute', analysis.target_compute_cost], ['Transfer estimate', analysis.transfer_cost], ['Migration overhead', analysis.migration_overhead], ['Other estimated costs', analysis.other_costs]]
+  return <section className="panel result-panel"><div className="result-heading"><div><span className="eyebrow">ESTIMATED OUTCOME</span><h2>Cost breakdown</h2></div><StatusBadge value="estimate" /></div><div className="breakdown">{rows.map(([label, value]) => <div key={label}><span>{label}</span><b>{formatMoney(value, 2)}</b></div>)}<div className="breakdown-total"><span>Target total cost</span><b>{formatMoney(analysis.target_total_cost, 2)}</b></div></div><div className={`net-result ${analysis.net_savings < 0 ? 'loss' : ''}`}><span>Estimated net savings</span><strong>{formatMoney(analysis.net_savings, 2)}</strong><small>{Number(analysis.savings_percent).toFixed(2)}% · assumptions only</small></div><div className="break-even"><span>Break-even duration</span><b>{analysis.break_even_hours == null ? 'Not reached' : `${Number(analysis.break_even_hours).toFixed(2)} hours`}</b></div><p className="result-note">Estimate only; not an actual bill or guaranteed savings. Excluded categories may materially change the outcome.</p></section>
+}
+
+function DecisionPage({ inputs, setInputs, run, result, pricing, prepareMigration }) {
+  const update = (key) => (event) => setInputs((current) => ({ ...current, [key]: event.target.type === 'checkbox' ? event.target.checked : event.target.value }))
+  return <>
+    <PageHeader eyebrow="RULE-BASED COMPARISON" title="Best cloud decision" subtitle="Recommendations require verified pricing, known capacity, compatible region, freshness, and like-for-like pricing models." />
+    <div className="decision-layout">
+      <form onSubmit={run} className="panel form-panel">
+        <h2>Workload requirements</h2><p className="panel-subtitle">Spot candidates are only allowed when the workload is explicitly interruption tolerant.</p>
+        <div className="form-grid">
+          <Field label="Current provider"><select value={inputs.current_provider} onChange={update('current_provider')}><ProviderOptions /></select></Field>
+          <Field label="Requested pricing model"><select value={inputs.pricing_type} onChange={update('pricing_type')}><option>OnDemand</option><option>Spot</option><option>Any</option></select></Field>
+          <Field label="Current hourly cost" prefix="$"><input type="number" min="0" step="any" value={inputs.current_hourly_cost} onChange={update('current_hourly_cost')} required /></Field>
+          <Field label="Duration" suffix="hours"><input type="number" min="0.01" step="any" value={inputs.duration_hours} onChange={update('duration_hours')} required /></Field>
+          <Field label="Required vCPU"><input type="number" min="1" step="1" value={inputs.required_vcpu} onChange={update('required_vcpu')} required /></Field>
+          <Field label="Required memory" suffix="GB"><input type="number" min="0.1" step="any" value={inputs.required_memory_gb} onChange={update('required_memory_gb')} required /></Field>
+          <Field label="Region (provider ID)"><input value={inputs.region} onChange={update('region')} placeholder="e.g. us-east1 or eastus" required /></Field>
+          <Field label="Minimum savings" suffix="%"><input type="number" min="0" max="100" step="any" value={inputs.minimum_savings_percent} onChange={update('minimum_savings_percent')} required /></Field>
+          <Field label="Transfer estimate" prefix="$"><input type="number" min="0" step="any" value={inputs.transfer_cost} onChange={update('transfer_cost')} /></Field>
+          <Field label="Migration overhead" prefix="$"><input type="number" min="0" step="any" value={inputs.migration_overhead} onChange={update('migration_overhead')} /></Field>
+        </div>
+        <label className="checkbox-field"><input type="checkbox" checked={inputs.workload_tolerates_interruptions} onChange={update('workload_tolerates_interruptions')} />Workload can tolerate Spot/preemptible interruption</label>
+        <button className="button primary" type="submit">Evaluate catalog candidates →</button>
+      </form>
+      <DecisionResult result={result} pricingCount={pricing.length} prepareMigration={prepareMigration} currentProvider={inputs.current_provider} />
+    </div>
+  </>
+}
+
+function DecisionResult({ result, pricingCount, prepareMigration, currentProvider }) {
+  if (!result) return <section className="panel decision-result empty-result"><span className="result-placeholder">✳</span><h2>No decision run yet</h2><p>The engine will stay on the current provider unless valid like-for-like candidates qualify.</p><p>{pricingCount} stored catalog records available for evaluation.</p></section>
+  return <section className="panel decision-result"><span className="eyebrow">DETERMINISTIC RESULT</span><div className="decision-provider"><span className="provider-logo">{result.recommended_provider}</span><div><small>RECOMMENDATION</small><h2>{result.recommended_provider}</h2></div><StatusBadge value={result.mode || 'unavailable'} /></div><p>{result.reason}</p><div className="decision-summary"><span>Estimated net savings</span><b>{result.estimated_net_savings == null ? 'Unavailable' : formatMoney(result.estimated_net_savings, 2)}</b></div><h3>Evaluated candidates ({result.candidates?.length || 0})</h3>{result.candidates?.length ? result.candidates.map((item, index) => <div className="candidate-row" key={`${item.provider}-${item.sku_id}-${index}`}><span><i style={{ background: colors[item.provider] }} />{item.provider} · {item.instance_type}</span><b>{formatMoney(item.hourly_price, 5)}</b><small>{item.reason}</small></div>) : <EmptyState title="No eligible candidate" text="No current record has all verified hourly price, USD currency, region, pricing model, freshness, and capacity data required for this workload." />}<h3>Excluded observations ({result.rejected_candidates?.length || 0})</h3>{result.rejected_candidates?.slice(0, 8).map((item, index) => <div className="candidate-row rejected-row" key={`${item.provider}-${index}`}><span>{item.provider}</span><small>{item.reason}</small></div>)}<button className="button secondary full" disabled={!result.candidates?.some((item) => item.eligible)} onClick={() => prepareMigration(currentProvider, result.recommended_provider)}>Prepare migration simulation</button><p className="result-note">The engine never provisions resources. Retail rates are not actual bills or negotiated prices.</p></section>
+}
+
+function MigrationPage({ migrations, inputs, setInputs, create, advance, cancel, healthCheckPassed, setHealthCheckPassed }) {
+  const update = (key) => (event) => setInputs((current) => ({ ...current, [key]: event.target.value }))
+  return <>
+    <PageHeader eyebrow="SAFE WORKFLOW" title="Migration center" subtitle="Exercise the workflow state machine only. No real workloads, networks, or DNS records are changed." />
+    <div className="alert warning-alert"><b>Simulation only.</b><span>This UI does not provision, migrate, or switch live traffic. Simulated completion is not proof of a real migration.</span></div>
+    <form className="panel migration-create" onSubmit={create}><div className="form-grid">
+      <Field label="Source provider"><select value={inputs.source_provider} onChange={update('source_provider')}><ProviderOptions /></select></Field>
+      <Field label="Target provider"><select value={inputs.target_provider} onChange={update('target_provider')}><ProviderOptions /></select></Field>
+      <Field label="Workload label"><input value={inputs.workload_name} onChange={update('workload_name')} maxLength="120" placeholder="e.g. analytics-worker" required /></Field>
+      <label className="checkbox-field"><input type="checkbox" checked readOnly />Simulation mode enforced</label>
+    </div><button className="button primary" type="submit">Create migration simulation →</button></form>
+    <div className="migration-list">{migrations.length ? migrations.map((migration) => <MigrationCard key={migration.migration_id} migration={migration} advance={advance} cancel={cancel} healthCheckPassed={healthCheckPassed} setHealthCheckPassed={setHealthCheckPassed} />) : <section className="panel"><EmptyState title="No migration simulations" text="Create a simulation above to view the guarded step-by-step progression." /></section>}</div>
+  </>
+}
+
+function MigrationCard({ migration, advance, cancel, healthCheckPassed, setHealthCheckPassed }) {
+  const states = ['PENDING', 'PROVISIONING', 'DEPLOYING', 'HEALTH_CHECK', 'READY_TO_SWITCH', 'SWITCHING_TRAFFIC', 'VERIFYING', 'COMPLETED']
+  const currentIndex = states.indexOf(migration.state)
+  return <section className="panel migration-card"><div className="migration-card-head"><div><span className="eyebrow">{migration.workload_name}</span><h2>{migration.source_provider} <span>→</span> {migration.target_provider}</h2></div><StatusBadge value={migration.state} /></div><div className="migration-meta"><span>Created <b>{formatDate(migration.created_at)}</b></span><span className="sim-label">SIMULATION · NO RESOURCE CHANGES</span></div><div className="timeline">{states.map((state, index) => <div key={state} className={`timeline-step ${index <= currentIndex ? 'done' : ''} ${migration.state === 'FAILED' && index === currentIndex ? 'error' : ''}`}><span className="timeline-marker">{index < currentIndex ? '✓' : index + 1}</span><b>{state.replaceAll('_', ' ')}</b></div>)}</div>{migration.history?.length > 0 && <div className="history-message">{migration.history[migration.history.length - 1].message}</div>}<div className="migration-controls">{migration.state === 'HEALTH_CHECK' ? <label className="checkbox-field"><input type="checkbox" checked={healthCheckPassed} onChange={(event) => setHealthCheckPassed(event.target.checked)} />Health check passes</label> : <span className="muted">{migration.source_workload_active === false ? 'Source deactivated in simulation state only' : 'Source remains active'}</span>}<div>{!terminalStates.includes(migration.state) && <><button className="button secondary compact" onClick={() => cancel(migration)}>Cancel</button><button className="button primary compact" onClick={() => advance(migration)}>Advance simulation</button></>}</div></div></section>
+}
+
+function AnalyticsPage({ pricing, history, migrations, savedSavings }) {
+  const decisions = history.decision_items || []
+  return <>
+    <PageHeader eyebrow="OBSERVED WORKSPACE HISTORY" title="Analytics & history" subtitle={`Historical snapshots and saved estimates · ${formatMoney(savedSavings, 2)} net estimated savings · no generated sample metrics.`} />
+    <div className="metric-grid"><Metric label="Price snapshots" value={pricing.length} detail="Stored records returned by the API" icon="◈" tone="blue" /><Metric label="Cost analyses" value={history.items?.length || 0} detail="Saved deterministic estimates" icon="⌗" tone="purple" /><Metric label="Decision analyses" value={decisions.length} detail="Saved rules-based evaluations" icon="✳" tone="blue" /><Metric label="Migration runs" value={migrations.length} detail="Simulations only" icon="⇄" tone="orange" /></div>
+    <section className="panel table-panel"><div className="panel-heading"><div><h2>Cost analysis history</h2><p>Input-based estimates; not billing evidence</p></div></div><AnalysisTable items={history.items || []} /></section>
+    <section className="panel table-panel"><div className="panel-heading"><div><h2>Decision history</h2><p>Deterministic recommendations with evaluated candidate and rejection records</p></div></div><DecisionHistoryTable items={decisions} /></section>
+    <section className="panel table-panel history-panel"><div className="panel-heading"><div><h2>Recent pricing snapshots</h2><p>Provider-reported observations</p></div></div><PriceTable items={pricing.slice(0, 100)} /></section>
+    <section className="panel"><div className="panel-heading"><div><h2>Simulation history</h2><p>State transitions do not represent an actual cloud migration</p></div></div>{migrations.length ? migrations.map((item) => <div className="compact-row" key={item.migration_id}><span><b>{item.source_provider} → {item.target_provider} · {item.workload_name}</b><small>{formatDate(item.created_at)}</small></span><StatusBadge value={item.state} /></div>) : <EmptyState title="No simulation history" text="Created simulations appear here." />}</section>
+  </>
+}
+
+function DecisionHistoryTable({ items }) {
+  return <div className="table-wrap"><table><thead><tr><th>EVALUATED</th><th>CURRENT PROVIDER</th><th>RECOMMENDATION</th><th>ELIGIBLE CANDIDATES</th><th>ESTIMATED SAVINGS</th></tr></thead><tbody>{items.length ? items.map((item, index) => <tr key={item.created_at || index}><td>{formatDate(item.evaluated_at || item.created_at)}</td><td>{item.inputs?.current_provider || '—'}</td><td>{item.recommended_provider}</td><td>{item.candidates?.filter((candidate) => candidate.eligible).length || 0}</td><td>{item.estimated_net_savings == null ? 'Unavailable' : formatMoney(item.estimated_net_savings, 2)}</td></tr>) : <tr><td className="table-empty" colSpan="5">No decision analyses have been saved yet.</td></tr>}</tbody></table></div>
+}
+
+function AnalysisTable({ items }) {
+  return <div className="table-wrap"><table><thead><tr><th>CREATED</th><th>FROM → TO</th><th>CURRENT COST</th><th>TARGET TOTAL</th><th>NET ESTIMATE</th><th>SAVINGS</th></tr></thead><tbody>{items.length ? items.map((item, index) => <tr key={item.created_at || index}><td>{formatDate(item.created_at)}</td><td>{item.current_provider} → {item.target_provider}</td><td>{formatMoney(item.current_cost, 2)}</td><td>{formatMoney(item.target_total_cost, 2)}</td><td className="price-cell">{formatMoney(item.net_savings, 2)}</td><td>{Number(item.savings_percent || 0).toFixed(2)}%</td></tr>) : <tr><td className="table-empty" colSpan="6">No saved estimates yet.</td></tr>}</tbody></table></div>
+}
+
+function SettingsPage({ status, refresh, busy }) {
+  return <>
+    <PageHeader eyebrow="CONFIGURATION STATUS" title="Settings & integrations" subtitle="Configuration and operational health only. Secrets are never returned to this page." action={<button className="button secondary" onClick={refresh} disabled={busy}>{busy ? 'Refreshing…' : '↻ Refresh catalogs'}</button>} />
+    <div className="settings-grid">
+      <section className="panel settings-panel"><div className="panel-heading"><div><h2>Provider pricing</h2><p>Backend catalog connection state and last successful fetch</p></div></div><ProviderStatusRows providers={status.pricing?.providers || {}} /><div className="settings-assumption"><span>Pricing source</span><b>Public retail catalogs</b></div><div className="settings-assumption"><span>Authentication</span><b>GCP API key is backend-only; Azure public catalog needs no subscription ID</b></div><div className="settings-assumption"><span>Pricing disclaimer</span><b>Not negotiated rates or actual usage bills</b></div></section>
+      <section className="panel settings-panel"><div className="panel-heading"><div><h2>Persistence & runtime</h2><p>Degraded mode is reported explicitly</p></div></div><StatusRow name="FastAPI runtime" detail={`Mode: ${status.mode || 'unknown'}`} value="connected" /><StatusRow name="MongoDB" detail={`Persistence: ${status.database?.persistence || 'unknown'}`} value={status.database?.status || 'unknown'} /><StatusRow name="Groq explanations" detail="Optional explanation integration is not used for numerical pricing decisions." value={status.integrations?.groq_explanations || 'not_configured'} /><StatusRow name="Cloud provisioning" detail="Disabled; migration workflow is simulation-only." value="disabled" /><StatusRow name="DNS" detail="Mock behavior only; no production traffic changes." value={status.integrations?.dns || 'mock'} /></section>
+    </div>
+  </>
+}
+
+function StatusRow({ name, detail, value }) { return <div className="status-row"><span><b>{name}</b><small>{detail}</small></span><StatusBadge value={value} /></div> }
+
 function EmptyState({ title, text }) { return <div className="empty-state"><span>◌</span><b>{title}</b><p>{text}</p></div> }
 
 export default App
