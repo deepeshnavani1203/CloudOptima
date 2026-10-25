@@ -4,6 +4,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.db import store
+from app.config import settings
 from app.main import app
 from app.services import pricing
 
@@ -52,6 +53,17 @@ def test_health_and_pricing_report_provider_status_without_exposing_credentials(
     status = client.get("/api/pricing/status").json()
     assert set(status["providers"]) == {"GCP", "Azure"}
     assert "GCP_BILLING_API_KEY" not in str(status)
+
+
+def test_preflight_allows_configured_frontend_origin(client):
+    response = client.options("/api/health", headers={
+        "Origin": settings.frontend_origin,
+        "Access-Control-Request-Method": "GET",
+        "Access-Control-Request-Headers": "content-type",
+    })
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == settings.frontend_origin
 
 
 def test_cost_endpoint_validates_and_returns_full_breakdown(client):

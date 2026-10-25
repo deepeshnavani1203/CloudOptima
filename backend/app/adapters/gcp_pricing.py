@@ -40,8 +40,6 @@ def _hourly_rate(expression: dict) -> tuple[float | None, str | None]:
     if not isinstance(expression, dict):
         return None, None
     usage_unit = str(expression.get("usageUnit", "")).strip().lower()
-    if usage_unit not in {"h", "hour", "hours", "1 hour", "instance-hour"}:
-        return None, None
     tiers = [tier for tier in (expression.get("tieredRates") or []) if isinstance(tier, dict)]
     first_tier = None
     for tier in tiers:
@@ -53,10 +51,13 @@ def _hourly_rate(expression: dict) -> tuple[float | None, str | None]:
             first_tier = tier
             break
     if not first_tier:
-        return None, usage_unit
-    unit = str(first_tier.get("unit", "")).strip().lower()
-    if unit not in {"h", "hour", "hours", "1 hour", "instance-hour"}:
-        return None, unit or usage_unit
+        return None, usage_unit or None
+    unit = str(first_tier.get("unit") or usage_unit).strip().lower()
+    if unit not in {
+        "h", "hour", "hours", "1 hour", "instance-hour",
+        "giby.h", "gby.h",
+    }:
+        return None, None
     return _money(first_tier.get("unitPrice") or {}), unit
 
 
@@ -68,8 +69,8 @@ def _pricing_type(sku: dict) -> tuple[str, str]:
     description = str(sku.get("description", "")).lower()
     if usage_type == "PREEMPTIBLE" or "preemptible" in description or "spot" in description:
         return "Spot", "Catalog usage type or SKU description explicitly identifies Spot/preemptible pricing."
-    if usage_type == "STANDARD":
-        return "OnDemand", "Catalog usage type identifies standard pricing; not a Spot price."
+    if usage_type in {"STANDARD", "ONDEMAND"}:
+        return "OnDemand", "Catalog usage type identifies on-demand pricing; not a Spot price."
     return "Unclassified", "Catalog fields do not reliably identify the pricing model."
 
 
@@ -240,6 +241,7 @@ async def fetch_gcp_prices() -> tuple[list[dict], datetime]:
                             "pricing_evidence": price_evidence,
                             "native_price": rate,
                             "native_unit": native_unit or expression.get("usageUnit"),
+                            "native_unit_description": expression.get("usageUnitDescription"),
                             "effective_at": info.get("effectiveTime"),
                             "fetched_at": fetched_at,
                             "source_url": SOURCE_URL.format(service_id=service["serviceId"]),

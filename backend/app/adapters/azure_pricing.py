@@ -1,6 +1,7 @@
 import asyncio
 import math
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from urllib.parse import urlparse
 
 import httpx
@@ -9,7 +10,8 @@ from app.adapters.pricing_common import ProviderRequestError
 from app.config import settings
 
 PRICES_URL = "https://prices.azure.com/api/retail/prices"
-MAX_PAGES = 5
+API_VERSION = "2023-01-01-preview"
+MAX_PAGES = 2
 
 
 def _hourly_unit(unit: str) -> bool:
@@ -31,6 +33,12 @@ def _pricing_type(item: dict) -> tuple[str, str]:
     price_type = str(item.get("type", "")).strip().lower()
     if price_type == "spot":
         return "Spot", "Azure Retail Prices API type is Spot."
+    meter_name = str(item.get("meterName", "")).strip().lower()
+    sku_name = str(item.get("skuName", "")).strip().lower()
+    if price_type in {"consumption", "devtestconsumption"} and (
+        "spot" in meter_name or "spot" in sku_name
+    ):
+        return "Spot", "Azure Consumption catalog meter/SKU explicitly identifies Spot pricing."
     if price_type == "consumption":
         return "OnDemand", "Azure Retail Prices API type is Consumption; this is not Spot pricing."
     return "Unclassified", "Azure Retail Prices API did not identify a supported pricing type."
@@ -57,105 +65,123 @@ def _safe_next_url(url: str) -> str:
     return url
 
 
+def _retry_after_seconds(value: str | None, now: datetime | None = None) -> int:
+    if value:
+        try:
+            return max(1, min(int(value), 3600))
+        except ValueError:
+            try:
+                retry_at = parsedate_to_datetime(value)
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                current_time = now or datetime.now(timezone.utc)
+                return max(1, min(math.ceil((retry_at - current_time).total_seconds()), 3600))
+            except (TypeError, ValueError, OverflowError):
+                pass
+    return 60
+
+
 async def fetch_azure_prices(region: str | None = None) -> tuple[list[dict], datetime, list[str]]:
     if not settings.azure_pricing_enabled:
         raise ProviderRequestError("Azure Retail Prices integration is disabled.")
+    if not region:
+        raise ProviderRequestError(
+            "Enter an Azure region (for example, eastus) before fetching VM prices."
+        )
 
     fetched_at = datetime.now(timezone.utc)
     records = []
     warnings = []
-    completed_queries = 0
     async with httpx.AsyncClient(timeout=httpx.Timeout(15)) as client:
-        for price_type in ("Consumption", "Spot"):
-            try:
-                filters = [
-                    "serviceName eq 'Virtual Machines'",
-                    f"priceType eq '{price_type}'",
-                ]
-                if region:
-                    filters.append(f"armRegionName eq '{region}'")
-                params = {"$filter": " and ".join(filters)}
-                url = PRICES_URL
-                for page in range(MAX_PAGES):
-                    payload = await _get_json(client, url, params if page == 0 else None)
-                    if not isinstance(payload, dict) or not isinstance(payload.get("Items", []), list):
-                        raise ProviderRequestError("Azure returned an incomplete retail pricing response.")
+        filters = [
+            "serviceName eq 'Virtual Machines'",
+            "priceType eq 'Consumption'",
+        ]
+        filters.append(f"armRegionName eq '{region}'")
+        params = {
+            "$filter": " and ".join(filters),
+            "api-version": API_VERSION,
+        }
+        url = PRICES_URL
+        for page in range(MAX_PAGES):
+            payload = await _get_json(client, url, params if page == 0 else None)
+            if not isinstance(payload, dict) or not isinstance(payload.get("Items", []), list):
+                raise ProviderRequestError("Azure returned an incomplete retail pricing response.")
 
-                    for item in payload.get("Items", []):
-                        if not isinstance(item, dict):
-                            continue
-                        if not _is_vm(item):
-                            continue
-                        classified_type, evidence = _pricing_type(item)
-                        expected_type = "Spot" if price_type == "Spot" else "OnDemand"
-                        unit = str(item.get("unitOfMeasure") or "")
-                        currency = str(item.get("currencyCode") or "UNK").upper()
-                        raw_price = item.get("retailPrice")
-                        effective_raw = item.get("effectiveStartDate")
-                        effective_at = _parse_datetime(effective_raw)
-                        try:
-                            native_price = float(raw_price) if raw_price is not None else None
-                        except (TypeError, ValueError):
-                            native_price = None
-                        if native_price is not None and (not math.isfinite(native_price) or native_price < 0):
-                            native_price = None
-                        valid_price = (
-                            native_price is not None
-                            and _hourly_unit(unit)
-                            and currency == "USD"
-                            and classified_type == expected_type
-                            and (effective_raw is None or (effective_at is not None and effective_at <= fetched_at))
-                        )
-                        if valid_price:
-                            price_evidence = evidence
-                        elif effective_raw is not None and (effective_at is None or effective_at > fetched_at):
-                            price_evidence = "Provider price is not effective yet or its effective date is invalid."
-                        elif currency == "UNK":
-                            price_evidence = "Provider catalog did not return a currency for this price."
-                        elif currency != "USD":
-                            price_evidence = "Only USD catalog prices are currently comparable; no currency conversion is applied."
-                        elif not _hourly_unit(unit):
-                            price_evidence = "Meter unit is not a directly supported hourly unit."
-                        else:
-                            price_evidence = "No non-negative, verified hourly retail price is available for this meter."
-                        records.append({
-                            "provider": "Azure",
-                            "region": str(item.get("armRegionName") or "unknown"),
-                            "instance_type": str(item.get("armSkuName") or item.get("skuName") or item.get("meterName") or "Virtual Machine SKU"),
-                            "vcpu": None,
-                            "memory_gb": None,
-                            "hourly_price": native_price if valid_price else None,
-                            "currency": currency,
-                            "pricing_type": classified_type,
-                            "source": "Azure Retail Prices API",
-                            "observed_at": fetched_at,
-                            "freshness": "fresh",
-                            "availability_evidence": "Public retail catalog listing; regional capacity is not verified.",
-                            "interruption_risk": "high" if classified_type == "Spot" else "unknown",
-                            "sku_id": item.get("skuId"),
-                            "arm_sku_name": item.get("armSkuName"),
-                            "meter_id": item.get("meterId"),
-                            "service_id": item.get("serviceId"),
-                            "product_id": item.get("productId"),
-                            "meter_name": item.get("meterName"),
-                            "pricing_model_status": "unclassified" if classified_type == "Unclassified" else "verified",
-                            "pricing_evidence": price_evidence,
-                            "native_price": native_price,
-                            "native_unit": unit or None,
-                            "effective_at": effective_at,
-                            "fetched_at": fetched_at,
-                            "source_url": PRICES_URL,
-                            "specifications_complete": False,
-                        })
-                    next_url = payload.get("NextPageLink")
-                    if not next_url:
-                        break
-                    url = _safe_next_url(str(next_url))
-                completed_queries += 1
-            except ProviderRequestError as error:
-                warnings.append(f"{price_type} pricing query: {error}")
-    if not completed_queries:
-        raise ProviderRequestError("; ".join(warnings))
+            for item in payload.get("Items", []):
+                if not isinstance(item, dict):
+                    continue
+                if not _is_vm(item):
+                    continue
+                classified_type, evidence = _pricing_type(item)
+                unit = str(item.get("unitOfMeasure") or "")
+                currency = str(item.get("currencyCode") or "UNK").upper()
+                raw_price = item.get("retailPrice")
+                effective_raw = item.get("effectiveStartDate")
+                effective_at = _parse_datetime(effective_raw)
+                try:
+                    native_price = float(raw_price) if raw_price is not None else None
+                except (TypeError, ValueError):
+                    native_price = None
+                if native_price is not None and (not math.isfinite(native_price) or native_price < 0):
+                    native_price = None
+                valid_price = (
+                    native_price is not None
+                    and _hourly_unit(unit)
+                    and currency == "USD"
+                    and classified_type in {"Spot", "OnDemand"}
+                    and (effective_raw is None or (effective_at is not None and effective_at <= fetched_at))
+                )
+                if valid_price:
+                    price_evidence = evidence
+                elif effective_raw is not None and (effective_at is None or effective_at > fetched_at):
+                    price_evidence = "Provider price is not effective yet or its effective date is invalid."
+                elif currency == "UNK":
+                    price_evidence = "Provider catalog did not return a currency for this price."
+                elif currency != "USD":
+                    price_evidence = "Only USD catalog prices are currently comparable; no currency conversion is applied."
+                elif not _hourly_unit(unit):
+                    price_evidence = "Meter unit is not a directly supported hourly unit."
+                else:
+                    price_evidence = "No non-negative, verified hourly retail price is available for this meter."
+                records.append({
+                    "provider": "Azure",
+                    "region": str(item.get("armRegionName") or "unknown"),
+                    "instance_type": str(item.get("armSkuName") or item.get("skuName") or item.get("meterName") or "Virtual Machine SKU"),
+                    "vcpu": None,
+                    "memory_gb": None,
+                    "hourly_price": native_price if valid_price else None,
+                    "currency": currency,
+                    "pricing_type": classified_type,
+                    "source": "Azure Retail Prices API",
+                    "observed_at": fetched_at,
+                    "freshness": "fresh",
+                    "availability_evidence": "Public retail catalog listing; regional capacity is not verified.",
+                    "interruption_risk": "high" if classified_type == "Spot" else "unknown",
+                    "sku_id": item.get("skuId"),
+                    "arm_sku_name": item.get("armSkuName"),
+                    "meter_id": item.get("meterId"),
+                    "service_id": item.get("serviceId"),
+                    "product_id": item.get("productId"),
+                    "meter_name": item.get("meterName"),
+                    "pricing_model_status": "unclassified" if classified_type == "Unclassified" else "verified",
+                    "pricing_evidence": price_evidence,
+                    "native_price": native_price,
+                    "native_unit": unit or None,
+                    "effective_at": effective_at,
+                    "fetched_at": fetched_at,
+                    "source_url": PRICES_URL,
+                    "specifications_complete": False,
+                })
+            next_url = payload.get("NextPageLink")
+            if not next_url:
+                break
+            if page == MAX_PAGES - 1:
+                warnings.append(
+                    f"Azure results were capped at {MAX_PAGES} pages to limit catalog requests; results may be partial. Narrow by region where possible."
+                )
+                break
+            url = _safe_next_url(str(next_url))
     return records, fetched_at, warnings
 
 
@@ -165,7 +191,14 @@ async def _get_json(client: httpx.AsyncClient, url: str, params: dict | None = N
         try:
             response = await client.get(url, params=params)
             last_status = response.status_code
-            if (response.status_code == 429 or response.status_code >= 500) and attempt == 0:
+            if response.status_code == 429:
+                retry_after = _retry_after_seconds(response.headers.get("Retry-After"))
+                raise ProviderRequestError(
+                    f"Azure Retail Prices API is rate-limited. Retry after about {retry_after} seconds.",
+                    429,
+                    retry_after,
+                )
+            if response.status_code >= 500 and attempt == 0:
                 await asyncio.sleep(0.25)
                 continue
             response.raise_for_status()
@@ -180,8 +213,6 @@ async def _get_json(client: httpx.AsyncClient, url: str, params: dict | None = N
             raise ProviderRequestError("Azure Retail Prices request timed out.") from error
         except httpx.HTTPStatusError as error:
             status = error.response.status_code
-            if status == 429:
-                raise ProviderRequestError("Azure Retail Prices rate limit was reached.", status) from error
             raise ProviderRequestError(f"Azure Retail Prices request failed (HTTP {status}).", status) from error
         except (ValueError, httpx.RequestError) as error:
             if attempt == 0 and isinstance(error, httpx.RequestError):

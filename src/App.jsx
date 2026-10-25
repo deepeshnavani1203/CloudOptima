@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import './App.css'
 
-const API = import.meta.env.VITE_API_URL || 'http://localhost:8000/api'
+const API = import.meta.env.VITE_API_URL || '/api'
 const navigation = [
   ['Overview', '⌂'],
   ['Cloud pricing', '◈'],
@@ -74,6 +74,7 @@ function App() {
   const [error, setError] = useState('')
   const [toast, setToast] = useState('')
   const [region, setRegion] = useState('')
+  const [azureRegion, setAzureRegion] = useState('eastus')
   const [healthCheckPassed, setHealthCheckPassed] = useState(true)
   const [decisionInputs, setDecisionInputs] = useState({
     current_provider: 'GCP',
@@ -128,7 +129,7 @@ function App() {
     setPricingBusy(true)
     setError('')
     try {
-      const query = region ? `?region=${encodeURIComponent(region)}` : ''
+      const query = azureRegion ? `?region=${encodeURIComponent(azureRegion)}` : ''
       const result = await api(`/pricing/refresh${query}`, { method: 'POST' })
       setPricing(result.items || [])
       const latestStatus = await api('/pricing/status')
@@ -277,7 +278,8 @@ function App() {
           />}
           {page === 'Cloud pricing' && <PricingPage
             pricing={pricing} status={status.pricing || { providers: {} }} busy={pricingBusy}
-            refresh={refreshPricing} region={region} setRegion={setRegion} error={error}
+            refresh={refreshPricing} region={region} setRegion={setRegion}
+            azureRegion={azureRegion} setAzureRegion={setAzureRegion}
           />}
           {page === 'Cost calculator' && <CalculatorPage
             cost={cost} setCost={setCost} calculate={calculate} analysis={analysis} pricing={pricing} history={history.items || []}
@@ -376,16 +378,15 @@ function ProviderStatusRows({ providers: providerStatuses }) {
 
 function StatusBadge({ value }) {
   const label = String(value || 'unknown').replaceAll('_', ' ')
-  const state = ['connected', 'cached', 'completed'].includes(String(value).toLowerCase()) ? 'success' : ['error', 'failed'].includes(String(value).toLowerCase()) ? 'danger' : 'neutral'
+  const state = ['connected', 'cached', 'completed'].includes(String(value).toLowerCase()) ? 'success' : ['error', 'failed', 'rate_limited'].includes(String(value).toLowerCase()) ? 'danger' : 'neutral'
   return <span className={`status-badge ${state}`}>{label}</span>
 }
 
-function PricingPage({ pricing, status, busy, refresh, region, setRegion }) {
+function PricingPage({ pricing, status, busy, refresh, region, setRegion, azureRegion, setAzureRegion }) {
   const [provider, setProvider] = useState('All')
   const [model, setModel] = useState('All')
   const [search, setSearch] = useState('')
   const [freshness, setFreshness] = useState('All')
-  const regions = [...new Set(pricing.map((item) => item.region).filter((value) => value && value !== 'unknown'))].sort()
   const rows = pricing.filter((item) => (provider === 'All' || item.provider === provider)
     && (model === 'All' || item.pricing_type === model)
     && (freshness === 'All' || item.freshness === freshness.toLowerCase())
@@ -393,13 +394,17 @@ function PricingPage({ pricing, status, busy, refresh, region, setRegion }) {
     && (!region || item.region.toLowerCase().includes(region.toLowerCase())))
   return <>
     <PageHeader eyebrow="PRICE TELEMETRY" title="Cloud pricing explorer" subtitle="Inspect provider catalog evidence, pricing model, units, and freshness." action={<button className="button primary" onClick={refresh} disabled={busy}>{busy ? 'Refreshing…' : '↻ Refresh catalogs'}</button>} />
-    <div className="alert info-alert"><b>Public retail catalog data.</b><span>Rates are not negotiated contract prices, actual bills, or guarantees of deployed capacity. Incomplete or unsupported rows are retained with their limitations visible.</span></div>
+    <div className="alert info-alert"><b>Public retail catalog data.</b><span>Azure VM pricing is fetched for a region (default: eastus). Choose a region before refreshing to narrow requests and reduce rate limiting. Rates are not negotiated contract prices, actual bills, or guarantees of deployed capacity.</span></div>
+    <div className="filter-bar">
+      <label className="filter-field"><span>Azure VM catalog region</span><input value={azureRegion} onChange={(event) => setAzureRegion(event.target.value)} placeholder="eastus" /></label>
+      <span className="muted">Refresh fetches Azure VM prices for this region; the table filter below only filters displayed records.</span>
+    </div>
     <div className="filter-bar">
       <label className="search-field"><span>Search catalog</span><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="SKU, product, or meter" /></label>
       <Filter label="Provider" value={provider} onChange={setProvider} values={['All', ...providers]} />
       <Filter label="Pricing model" value={model} onChange={setModel} values={['All', 'Spot', 'OnDemand', 'Unclassified']} />
       <Filter label="Freshness" value={freshness} onChange={setFreshness} values={['All', 'Fresh', 'Stale']} />
-      <Filter label="Region" value={region} onChange={setRegion} values={['', ...regions]} emptyLabel="All regions" />
+      <label className="filter-field"><span>Region</span><input value={region} onChange={(event) => setRegion(event.target.value)} placeholder="All regions (e.g. eastus)" /></label>
     </div>
     <div className="provider-inline-status"><ProviderStatusRows providers={status.providers || {}} /></div>
     <section className="panel table-panel">
@@ -422,8 +427,8 @@ function PriceTable({ items, compact = false }) {
       <td className="sku-cell"><b>{item.instance_type || item.sku_id || 'Catalog item'}</b><small>{item.sku_id || 'SKU not provided'}{item.arm_sku_name ? ` · ${item.arm_sku_name}` : ''}{item.meter_id ? ` · meter ${item.meter_id}` : ''}{item.meter_name ? ` · ${item.meter_name}` : ''}</small></td>
       <td>{item.specifications_complete ? `${item.vcpu} vCPU · ${item.memory_gb} GB` : <span className="muted">Specs unavailable</span>}</td>
       <td><span className={`type-pill ${item.pricing_type === 'Spot' ? 'spot' : ''}`}>{item.pricing_type}</span><small className="table-subline">{item.pricing_model_status}</small></td>
-      <td className="price-cell">{formatMoney(item.hourly_price, 5, item.currency)}{item.hourly_price != null && <small className="table-subline">per instance-hour</small>}</td>
-      {!compact && <><td>{item.currency || 'Unknown'}<small className="table-subline">{item.native_unit || 'Unit not stated'}</small></td><td><span className="source-cell">{item.source}</span><small className="table-subline">{formatDate(item.fetched_at || item.observed_at)} · {item.freshness}</small></td></>}
+      <td className="price-cell">{item.hourly_price != null ? formatMoney(item.hourly_price, 5, item.currency) : item.native_price != null ? formatMoney(item.native_price, 5, item.currency) : '—'}{item.hourly_price != null ? <small className="table-subline">per instance-hour</small> : item.native_price != null ? <small className="table-subline">per {item.native_unit_description || item.native_unit || 'catalog unit'} · component rate, not full VM</small> : null}</td>
+      {!compact && <><td>{item.currency || 'Unknown'}<small className="table-subline">{item.native_unit_description || item.native_unit || 'Unit not stated'}</small></td><td><span className="source-cell">{item.source}</span><small className="table-subline">{formatDate(item.fetched_at || item.observed_at)} · {item.freshness}</small></td></>}
     </tr>) : <tr><td className="table-empty" colSpan={compact ? 6 : 8}>No catalog records match these filters. Refresh the catalogs or adjust your filters.</td></tr>}</tbody>
   </table></div>
 }

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from app.adapters.pricing_common import ProviderRequestError
 from app.db import store
 from app.services import pricing
+from app.services.pricing import _interleave_providers
 
 
 def test_refresh_keeps_successful_provider_records_when_other_provider_fails(monkeypatch):
@@ -87,3 +88,45 @@ def test_refresh_reports_partial_azure_query_failure(monkeypatch):
     assert result["providers"]["Azure"]["error"] is None
     assert result["providers"]["Azure"]["fetched_at"] == now
     assert any("Spot pricing query" in error for error in result["errors"])
+
+
+def test_azure_rate_limit_enters_cooldown_without_repeating_provider_request(monkeypatch):
+    calls = 0
+
+    async def azure_rate_limited(region=None):
+        nonlocal calls
+        calls += 1
+        raise ProviderRequestError("Azure rate limit.", 429, 120)
+
+    monkeypatch.setattr(pricing, "fetch_azure_prices", azure_rate_limited)
+    monkeypatch.setattr(pricing, "settings", SimpleNamespace(
+        azure_pricing_enabled=True,
+        gcp_billing_api_key="configured",
+        demo_mode=True,
+    ))
+    service = pricing.PricingService()
+
+    first = asyncio.run(service._fetch_provider("Azure"))
+    second = asyncio.run(service._fetch_provider("Azure"))
+
+    assert first["error"] == "Azure rate limit."
+    assert second["attempted"] is False
+    assert "retry in about 119" in second["error"] or "retry in about 120" in second["error"]
+    assert service.status()["providers"]["Azure"]["status"] == "rate_limited"
+    assert calls == 1
+
+
+def test_pricing_records_interleave_providers_before_pagination():
+    records = [
+        {"provider": "Azure", "sku_id": "azure-1"},
+        {"provider": "Azure", "sku_id": "azure-2"},
+        {"provider": "Azure", "sku_id": "azure-3"},
+        {"provider": "GCP", "sku_id": "gcp-1"},
+        {"provider": "GCP", "sku_id": "gcp-2"},
+    ]
+
+    result = _interleave_providers(records)
+
+    assert [record["provider"] for record in result] == [
+        "GCP", "Azure", "GCP", "Azure", "Azure"
+    ]

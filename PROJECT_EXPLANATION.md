@@ -1,298 +1,208 @@
-# CloudOptima — Multi-Cloud Spot Instance Arbitrage Engine
+# CloudOptima — Project Explanation, Modules aur Implementation
 
-**Tagline:** Compare verified cloud compute costs, account for migration overhead, and move workloads only when the evidence supports it.
+Ye document project ko idea se implementation tak explain karta hai. Pehla hissa original **Multi-Cloud Spot Instance Arbitrage Engine** concept batata hai; agla hissa current CloudOptima build mein actually kya bana hai, woh batata hai. Presentation mein proposal aur implemented functionality ko alag rakhna—isse scope clear aur honest rahega.
 
-> **Implementation honesty:** The repository currently provides a demo application, deterministic calculator, conservative no-price decision behavior, and simulated migration workflow. It does not fetch AWS, GCP, or Azure prices and does not provision cloud resources.
+## 1. Project ek nazar mein
 
-## 1. Problem statement
+CloudOptima ek multi-cloud cost-intelligence prototype hai. Iska goal GCP aur Azure ke public pricing evidence ko ek common view mein lana, workload inputs par estimated cost calculate karna, aur rules ke through suitable alternative cloud candidates evaluate karna hai.
 
-An organization may run workloads on more than one cloud and want to understand whether another provider’s Spot/Preemptible compute could reduce cost. Comparing only hourly sticker prices can be misleading: duration, region, instance compatibility, data egress, migration effort, pricing freshness, interruption behavior, and availability all matter.
+Simple flow:
 
-CloudOptima is intended to make those assumptions visible and calculate a deterministic estimate. In the current build, no provider price sources are connected, so the application deliberately declines to make a cross-cloud price recommendation.
+1. Provider catalogs se pricing observations laana.
+2. Backend records normalize, validate, timestamp aur store karta hai.
+3. User workload ki requirements aur cost assumptions enter karta hai.
+4. Calculator estimated total/savings nikalta hai; decision engine eligible candidates evaluate karta hai.
+5. Migration workflow ko safe simulation ke roop mein review karta hai.
+6. Dashboard saved estimates, decisions, status aur simulation history dikhata hai.
 
-## 2. Objectives
+**Ye kya nahi hai:** billing-system replacement, guaranteed savings tool, capacity reservation service, production migration platform, ya automatic cloud arbitrage bot nahi.
 
-- Provide a single dashboard for cloud-cost and migration concepts.
-- Validate and normalize provider price records before comparing them.
-- Calculate current/target cost, one-time transfer and migration costs, net savings, savings percentage, and break-even.
-- Recommend only from compatible and sufficiently fresh candidate data; otherwise stay on the current provider.
-- Model a gated migration workflow without claiming a simulated operation is real.
-- Keep provider secrets server-side and avoid accidental billable operations.
+## 2. Original project idea — Spot Instance Arbitrage Engine
 
-## 3. Actual technology stack
+Original concept ka problem statement hai ki cloud providers aur regions ke compute prices alag hote hain aur Spot/Preemptible capacity cheaper ho sakti hai—but interrupt ho sakti hai. Workload ko doosre provider/region par move karna tabhi faidemand hai jab:
 
-| Technology | Actual use in this repository |
+- workload target machine/region ke saath compatible ho;
+- price aur pricing model dono taraf comparable hon;
+- workload Spot interruption tolerate kar sake, agar Spot choose kiya gaya ho;
+- transfer, migration aur one-time costs ke baad bhi savings ho;
+- target health check pass ho aur rollback/source safety maintain rahe.
+
+**Arbitrage ka simple matlab:**
+
+> “Comparable workload ke liye ek option ka expected total cost doosre se kam ho, aur workload ke operational constraints bhi meet hon.”
+
+Sirf cheapest hourly rate dekhna kaafi nahi. Actual savings duration, data egress, region, machine specs, price freshness, capacity aur interruption risk par depend karti hai.
+
+## 3. Original proposal ke modules aur current implementation mapping
+
+### A. Price telemetry / provider pricing collectors
+
+**Purpose:** Provider catalog se price observations lena aur source, unit, model aur time ke saath comparison ke liye prepare karna.
+
+**Current build:** Backend adapters GCP Billing Catalog aur Azure Retail Prices public API se data lete hain. GCP ke liye configured Billing Catalog API key backend mein use hoti hai. Azure catalog public endpoint region-filtered pricing deta hai. Requests time-bounded hain; Azure pagination capped hai aur rate limit par `Retry-After`-based cooldown follow hota hai.
+
+Normalized observation mein provider, region, SKU/meter identity, pricing model, currency, unit/rate, source, effective/fetch time, freshness aur pricing evidence jaise fields preserve hote hain. Unsupported unit/model ko supported hourly instance price bana kar guess nahi kiya jata.
+
+**Important price distinction:** GCP catalog CPU aur memory ke component rates de sakta hai. UI native rate aur unit dikhati hai aur ise clearly component rate—not full VM price—label karti hai. Azure records mein complete vCPU/RAM specs absent ho sakti hain; catalog mein price milna machine fit prove nahi karta.
+
+**Boundaries:** Ye public retail catalog evidence hai—negotiated contract price, actual usage bill, live Spot capacity, ya availability guarantee nahi. Azure ke page cap ke kaaran result partial ho sakta hai.
+
+### B. Cost model / calculator
+
+**Purpose:** Workload duration ke dauran current-versus-target estimated compute cost compare karna aur one-time move costs include karna.
+
+**Current build calculation:**
+
+- Current compute = current hourly rate × duration.
+- Target compute = target hourly rate × duration.
+- Target total = target compute + transfer/egress estimate + migration overhead + other estimated costs.
+- Net estimated savings = current compute − target total.
+- Savings percentage = net estimated savings ÷ current compute × 100 (current cost zero ho toh percentage zero).
+- Break-even duration tab calculate hota hai jab target hourly rate current se lower ho; one-time costs ko hourly saving difference se divide kiya jata hai.
+- User ka minimum savings threshold result mein check hota hai.
+
+Backend mein cost calculation deterministic function hai: same inputs par same output. User inputs deta hai; optional verified catalog observation target rate prefill kar sakta hai.
+
+**Example:** Current `$0.12/hour`, target `$0.08/hour`, 720 hours, transfer `$5`, migration overhead `$2`:
+
+- Current total: `$0.12 × 720 = $86.40`.
+- Target compute: `$0.08 × 720 = $57.60`.
+- Target total: `$57.60 + $5 + $2 = $64.60`.
+- Net estimated savings: `$86.40 − $64.60 = $21.80` (lagbhag 25.23%).
+- Break-even: `$7 ÷ ($0.12 − $0.08) = 175 hours`.
+
+Savings negative bhi ho sakti hai; iska matlab target compute plus one-time expenses current cost se zyada hain. Taxes, negotiated discounts, support, licensing, storage aur unentered services include nahi hote.
+
+### C. Spot arbitrage / Best cloud decision engine
+
+**Purpose:** Sirf low price dekhne ke bajay workload requirements aur evidence ke basis par candidate qualify karna.
+
+**Current build:** Explainable rules-based engine alternatives evaluate karta hai. Checks mein region match/known normalized region group, vCPU/RAM requirements, fresh price, USD currency, supported hourly rate, verified pricing model, requested Spot/OnDemand model, minimum savings threshold aur Spot interruption tolerance shamil hain. Ineligible record ke saath rejection reason return hota hai. Eligible options estimated total cost ke hisaab se rank hote hain.
+
+**Why no candidate aa sakta hai:** Public catalog observations mein machine specs incomplete ho sakte hain. Agar region/specs/rate/model ka required evidence nahi ho, system assumption bana kar recommendation nahi deta. Iska goal false confidence se bachna hai.
+
+**Algorithm type:** Deterministic rules; machine-learning model ya future price predictor nahi. Spot ki future availability/interruption predict nahi karta.
+
+### D. Migration engine / orchestration flow
+
+**Original proposal:** Workload ko source se target environment tak migrate karna, validate karna aur safe cutover orchestrate karna.
+
+**Current build:** Migration center ek simulation state machine chalata hai:
+
+`PENDING → PROVISIONING → DEPLOYING → HEALTH_CHECK → READY_TO_SWITCH → SWITCHING_TRAFFIC → VERIFYING → COMPLETED`
+
+UI se state advance hoti hai. Health-check gate fail karne par simulation `FAILED` hoti hai aur source workload active bataya jata hai. Active simulation cancel bhi ho sakti hai. Har transition history mein record hoti hai.
+
+**Safety boundary:** Ye state labels workflow explain karne ke liye hain. Current code cloud resources provision/deploy nahi karta, application migrate nahi karta, aur real traffic switch nahi karta. Live operation disabled hai.
+
+### E. Container registry / image movement
+
+**Original proposal:** Container image ko source registry se target registry tak copy karna, taaki target environment mein same artifact deploy kiya ja sake.
+
+**Current build:** Real registry integration, image push/pull/copy aur deployment implemented nahi hain. Presentation mein ise future extension/proposal ke roop mein explain karein; completed module claim na karein.
+
+### F. Shared datastore / history
+
+**Purpose:** Pricing snapshots, cost analyses, decision results, migration simulations aur audit events ko save karke workspace history dena.
+
+**Current build:** `DocumentStore` MongoDB connected ho toh MongoDB use karta hai; connection unavailable ho toh explicit in-memory mode mein chalta hai. API status persistence mode report karta hai. Pricing records, calculations, decisions, migration state transitions aur audit events relevant collections mein save hote hain.
+
+**Persistence caveat:** Memory mode data process lifetime tak hi hota hai. Backend stop/restart par in-memory history aur cache reset ho sakte hain. Demo mein status check karo; memory history ko permanent storage mat bolo.
+
+### G. DNS failover / traffic routing
+
+**Original proposal:** Health validation ke baad DNS ko target endpoint ki taraf switch karna aur failover/cutover support karna.
+
+**Current build:** Sirf `MockDnsAdapter` hai. Ye endpoint validate karke simulated response deta hai; health failure par request reject karta hai. Real DNS provider credentials/configuration ya DNS record changes supported nahi hain.
+
+### H. Dashboard / user interface
+
+**Purpose:** Technical API aur pricing evidence ko demo-friendly pages mein dikhana.
+
+**Current pages:** Overview, Cloud pricing, Cost calculator, Best cloud decision, Migration center, Analytics & history, Settings.
+
+UI backend endpoints call karta hai, inputs submit karta hai, pricing search/filter karta hai, aur provider status/warnings/results dikhata hai. Savings aur pricing caveats visible rakhe gaye hain.
+
+## 4. Current app ke modules aur code organization
+
+| Layer / module | Responsibility |
 |---|---|
-| React 19 | UI components and page state |
-| Vite 8 | Frontend dev server/build; scripts in `package.json` |
-| JavaScript + JSX | Current frontend source; it is **not TypeScript** |
-| CSS | Responsive custom interface styles in `src\App.css` and `src\index.css` |
-| Python 3.11+ | Backend runtime; local `uv` lock currently selects an available Python |
-| FastAPI | HTTP API, OpenAPI docs, route composition |
-| Pydantic 2 | Request/normalized-price validation in `backend\app\schemas.py` |
-| PyMongo AsyncMongoClient | Optional asynchronous MongoDB driver |
-| python-dotenv | Loads `backend\.env` |
-| uv | Dependency lock and backend virtual environment (`pyproject.toml`, `uv.lock`) |
-| pytest + FastAPI TestClient | Backend tests |
-| MongoDB | Optional persistence; explicit memory fallback when unavailable |
-
-The original specification mentioned TypeScript, Tailwind, React Router, TanStack Query, Recharts, Axios, shadcn/ui, cloud SDKs, and Groq. Those are **not dependencies or active integrations** in the current code; the interface uses native components/CSS and Fetch API.
-
-## 4. Architecture and request flow
-
-```mermaid
-flowchart LR
-  U[User in browser] --> UI[React and Vite UI]
-  UI -->|Fetch JSON /api| API[FastAPI app]
-  API --> R[Route modules]
-  R --> S[Deterministic services]
-  S --> P[Pydantic schemas]
-  R --> DB{MongoDB available?}
-  DB -->|yes| M[(MongoDB collections)]
-  DB -->|no| MEM[In-memory demo store]
-  API --> UI
-  AWS[AWS price adapter: absent]
-  GCP[GCP price adapter: absent]
-  AZ[Azure price adapter: absent]
-```
-
-The app is assembled in `backend\app\main.py`, which adds CORS for `FRONTEND_ORIGIN` and includes routers. `src\App.jsx` loads health, pricing, and migrations from `/api`. If the API is unreachable because of a network failure, some calculator and migration actions have browser-local fallbacks; those results are not backend-persisted. HTTP errors are surfaced rather than presented as successful live actions.
-
-## 5. Implementation status
-
-| Feature | Status | Evidence/behavior |
-|---|---|---|
-| Dashboard and responsive navigation | Implemented UI | `src\App.jsx`, `src\App.css` |
-| Cloud price display | Empty/unavailable state | `GET /api/pricing` returns `items: []` |
-| AWS Spot price adapter | Missing | No SDK/provider adapter; `AWS_PROFILE` is not consumed |
-| GCP pricing adapter | Missing | No client/API call; GCP env values are placeholders |
-| Azure Retail Prices adapter | Missing | No HTTP/API call; Azure env value is placeholder |
-| Price schema/normalization utility | Partly implemented | `PriceRecord`, `normalize_price`, `is_fresh`; no live retrieval path |
-| Cost calculator | Implemented | API and browser fallback accept caller-entered values |
-| Decision logic | Service implemented; API has no candidates | API passes an empty list, returns current provider and `null` savings |
-| MongoDB | Optional partial persistence | Indexes and store exist; costs/migrations/audit events are persisted when connected |
-| Migration workflow | Simulation only | State transitions and health gate; no cloud resources or real traffic switch |
-| DNS | Mock only | Validates URL and health flag; does not alter DNS |
-| Analytics | Basic | Saved analyses and migration counts; not a historical provider price series |
-| Cloud provisioning | Disabled/not implemented | No provider SDKs, credentials, or resource creation/termination |
-| Authentication/authorization | Missing | API is intended for local demo only |
-| Groq explanation | Missing/placeholder | Environment variable exists but no Groq client or endpoint |
-| Scheduler/WebSocket | Missing | No background refresh task or progress socket |
-
-## 6. Frontend features and behavior
-
-### Dashboard
-
-Shows price-record count, latest entered calculation/savings state, decision state, migrations, pricing comparison panel, and activity. Since API pricing currently returns no records, the dashboard displays empty/unavailable states rather than a fabricated chart.
-
-### Cloud Pricing
-
-Calls the pricing list/refresh routes. Current response has no records and reports that adapters are unavailable. There is no static provider-price seed in the UI.
-
-### Cost Calculator
-
-Accepts current/target hourly compute prices, duration, transfer/egress, migration overhead, other costs, provider names, and savings threshold. The values are user-entered; they should come from a quote or be clearly labeled as a classroom arithmetic example.
-
-### Decision Engine
-
-Collects current provider, current hourly cost, duration, capacity, region, transfer/migration assumptions, and savings threshold. The current API calls the decision service with an empty pricing list, so no candidate can be ranked. This is a deliberate conservative result, not a live optimization.
-
-### Migration Center
-
-Creates a simulation, displays its timeline, offers a health-check pass/fail control, and allows advance/cancel. The frontend can fall back to a browser-only simulation if the API is unreachable; those operations remain simulations. Neither frontend nor backend provisions a cloud instance.
-
-### Analytics and Settings
-
-Analytics displays saved cost calculations and migration counts available in the current process/database. It is not a historical pricing chart from provider feeds. Settings shows backend/MongoDB and integration status; it does not expose credentials.
-
-## 7. Backend modules
-
-| File/module | Responsibility |
-|---|---|
-| `backend\app\main.py` | FastAPI lifecycle, CORS, router composition |
-| `backend\app\routers\settings.py` | Health and settings status |
-| `backend\app\routers\pricing.py` | Empty pricing response and unavailable refresh |
-| `backend\app\routers\costs.py` | Validated cost-calculation endpoint and saving result |
-| `backend\app\routers\decisions.py` | Recommendation endpoint; currently sends no prices |
-| `backend\app\routers\migrations.py` | Create, list, read, advance, cancel simulation |
-| `backend\app\routers\analytics.py` | Saved analysis and migration count response |
-| `backend\app\routers\dns.py` | Mock DNS endpoint |
-| `backend\app\schemas.py` | Pydantic price, cost, decision, and migration request models |
-| `backend\app\services\pricing.py` | Price schema validation, default USD, 24-hour freshness helper |
-| `backend\app\services\costs.py` | Deterministic estimate formulas |
-| `backend\app\services\decisions.py` | Capacity/region/freshness checks and cost ranking when passed records |
-| `backend\app\services\migrations.py` | Simulation state machine and terminal-state guards |
-| `backend\app\adapters\dns.py` | Mock-only URL and health validation |
-| `backend\app\db.py` | Async MongoDB setup/indexes and memory fallback |
+| `src/App.jsx`, `src/App.css` | React navigation/pages, form state, API calls, tables, results aur styling |
+| `backend/app/adapters/gcp_pricing.py` | GCP Billing Catalog request aur SKU rate parsing |
+| `backend/app/adapters/azure_pricing.py` | Azure Retail Prices request, region/pagination, meter classification aur rate-limit response |
+| `backend/app/adapters/pricing_common.py` | Providers ke beech shared request-error contract |
+| `backend/app/schemas.py` | Pydantic request/price-record shapes, input bounds aur validation |
+| `backend/app/services/pricing.py` | Normalization, freshness, cache, provider status, persistence aur provider-balanced listing |
+| `backend/app/services/costs.py` | Deterministic estimate, net savings aur break-even calculations |
+| `backend/app/services/decisions.py` | Workload checks, candidate eligibility, rejection reasons aur ranking |
+| `backend/app/services/migrations.py` | Simulation states, health gate, cancellation aur transition history |
+| `backend/app/db.py` | MongoDB connection/indexes plus explicit memory fallback |
+| `backend/app/routers/` | HTTP routes: pricing, costs, decisions, analytics, migrations, settings, DNS |
+| `backend/app/main.py` | FastAPI app lifecycle, CORS aur router registration |
+| `backend/tests/` | Adapter, service, validation aur endpoint behavior tests |
 
-The pricing normalization utility is not called by a live adapter because no adapter exists. The decision service can process supplied records in unit tests; the public decision endpoint currently has no retrieval source and passes `[]`.
+## 5. Request flow — browser se result tak
 
-## 8. API surface
+1. React page user inputs leta hai aur `/api/...` endpoint ko JSON request bhejta hai.
+2. Vite proxy frontend ke `/api` requests ko backend API tak route karta hai.
+3. FastAPI router request ko Pydantic schema se validate karta hai.
+4. Relevant service calculation/rules chalata hai; pricing refresh mein provider adapter public catalog query karta hai.
+5. Normalized result optional MongoDB ya memory-mode `DocumentStore` mein persist hota hai.
+6. API JSON response deta hai; React result, status ya error ko UI mein dikhata hai.
 
-Base URL: `http://localhost:8000/api`; interactive schema: `http://localhost:8000/docs`.
+Backend CORS configured frontend origin tak scoped hai. Provider secrets frontend ko return nahi kiye jaate.
 
-| Method | Path | Response behavior |
-|---|---|---|
-| GET | `/health` | App mode, persistence, integration availability |
-| GET | `/pricing` | Empty prices with warnings |
-| POST | `/pricing/refresh` | No records; reports no adapter queried |
-| POST | `/cost/calculate` | Cost breakdown and assumptions |
-| POST | `/decisions/recommend` | Stay-put recommendation when input price list is empty |
-| GET | `/analytics/savings` | Saved calculations and migration counts |
-| POST | `/migrations` | Create simulation, HTTP 201 |
-| GET | `/migrations` | List simulations |
-| GET | `/migrations/{migration_id}` | Fetch simulation; HTTP 404 if missing |
-| POST | `/migrations/{migration_id}/advance` | Advance a state; health gate and terminal-state checks |
-| POST | `/migrations/{migration_id}/cancel` | Cancel non-terminal simulation |
-| GET | `/settings/status` | Health/integration status |
-| POST | `/dns/simulate` | Mock DNS response; expects endpoint and healthy query parameters |
+## 6. Technology stack — current code mein kya use hota hai?
 
-Pydantic input validation produces HTTP 422 for invalid values. Invalid migration state changes use HTTP 409; live operations are rejected. Example JSON is in `backend\requests.http`.
+- **Frontend:** React, Vite, JavaScript/JSX, project CSS. UI native React/CSS tables aur visualizations use karta hai.
+- **Backend:** Python, FastAPI, Pydantic, asynchronous `httpx`.
+- **Persistence:** Async PyMongo/MongoDB optional; local/demo fallback in-memory.
+- **Python tooling/tests:** `uv` environment/dependency management aur `pytest`.
+- **External pricing sources:** Google Cloud Billing Catalog API aur Azure Retail Prices API.
+- **API style:** `/api` prefix ke neeche JSON REST endpoints.
 
-## 9. Pricing, normalization, and data provenance
+TypeScript, Tailwind, React Router, Recharts, Axios, TanStack Query, shadcn/ui aur live Groq-based numerical decision logic current implementation ka hissa nahi hain. Project mein unhe use kiya gaya hai aisa claim na karein.
 
-The normalized `PriceRecord` schema expects:
+## 7. Current build mein intentionally kya out of scope hai?
 
-- provider, region, and instance type;
-- positive vCPU and memory;
-- non-negative hourly price and USD currency;
-- pricing type, source, observation timestamp, freshness;
-- availability evidence and interruption-risk label.
+- AWS provider pricing; confirmed scope GCP + Azure hai.
+- Real VM/container provisioning, migration ya teardown.
+- Container registry/image copy.
+- Production DNS record ya traffic changes; DNS mock-only hai.
+- Future Spot-price prediction, actual capacity guarantee, ya billing-account invoice ingestion.
+- Groq/LLM-based numerical decisions; calculations aur decisions deterministic hain.
+- Frontend par provider secrets; secret-bearing config backend par rehti hai.
 
-`normalize_price()` defaults a missing currency to USD and validates through Pydantic. `is_fresh()` treats prices within 24 hours as fresh and rejects future timestamps. These utilities are unit-tested, but they do not fetch or persist provider records on their own.
+## 8. Sir ke likely questions — honest short answers
 
-Different price types must not be casually mixed:
+**“Project ka main use kya hai?”**
 
-- **Demo/example values:** manually entered for arithmetic; not provider data.
-- **Public catalog/retail rates:** published prices for SKUs; may differ from negotiated bill.
-- **Spot price/history:** provider-defined Spot/Preemptible pricing, which still does not promise capacity or uptime.
-- **Cached/stale price:** a prior observation; its source and timestamp matter.
-- **Actual billed cost:** account-specific bill including usage, discounts, taxes, and other services; not implied by a public price API.
+“GCP/Azure public catalog observations inspect karna, workload assumptions ka cost estimate nikalna, aur eligible alternatives ko transparent rules se evaluate karna.”
 
-Before comparing, adapter code must prove same currency, billing unit, region, compatible SKU/CPU/memory, price type, source, and acceptable observation age. Never label catalog or sample data “live Spot price” without verifying that claim.
+**“Kya ye actual bill batata hai?”**
 
-## 10. Deterministic cost model
+“Nahi. Ye retail catalog aur user-provided assumptions ka estimate hai. Contract discounts, usage, taxes aur non-compute services actual billing ko badal sakte hain.”
 
-The implementation in `backend\app\services\costs.py` uses:
+**“Recommendation kyun nahi di?”**
 
-```text
-current cost      = current hourly cost × duration
-target compute    = target hourly cost × duration
-target total      = target compute + transfer + migration overhead + other costs
-net savings       = current cost − target total
-savings percent   = net savings ÷ current cost × 100, if current cost > 0
-break-even hours  = (transfer + migration overhead + other costs)
-                    ÷ (current hourly price − target hourly price),
-                    only when current hourly price is higher
-```
+“Recommendation ke liye price ke saath fresh compatible region, verified pricing model aur workload ke vCPU/RAM specs bhi chahiye. Evidence incomplete ho toh system reason ke saath reject karta hai; specs invent nahi karta.”
 
-Example using **classroom-only invented inputs** (not provider quotes):
+**“Spot safe hai?”**
 
-- Current: `$0.10/hour × 720 hours = $72.00`.
-- Target compute: `$0.07/hour × 720 = $50.40`.
-- Transfer `$12` + migration overhead `$5` + other `$3` are one-time costs.
-- Target total: `$50.40 + $12 + $5 + $3 = $70.40`.
-- Net savings: `$72.00 − $70.40 = $1.60`.
-- Savings percent: `$1.60 ÷ $72.00 × 100 ≈ 2.22%`.
-- Break-even: `$20 ÷ ($0.10 − $0.07) ≈ 666.7 hours`.
+“Spot/preemptible capacity interrupt ho sakti hai. Decision flow interruption tolerance explicitly check karta hai, lekin future availability ya interruption guarantee nahi karta.”
 
-Negative inputs and non-positive duration are rejected by Pydantic. A zero current total yields zero savings percentage instead of dividing by zero. Taxes, negotiated discounts, licensing, storage, and other services are excluded unless entered as other costs. Transfer and migration costs are one-time amounts and are not multiplied by duration.
+**“Migration real hai?”**
 
-## 11. Decision model and risk
+“Nahi, current build simulation-only hai. UI state transitions, health gate, cancellation aur history demonstrate karta hai; cloud deployment/traffic/DNS nahi badalta.”
 
-When the service receives candidate `PriceRecord`s, it rejects incompatible regions/capacity and stale/non-USD data, calculates full target cost, checks the configured savings threshold, and sorts by total cost. If no eligible alternative clears the threshold, it stays with the current provider.
+**“Original proposal ka registry/DNS/cloud provisioning kahan hai?”**
 
-**Current API limitation:** `/api/decisions/recommend` passes an empty list. Thus the working endpoint returns the current provider, no candidates, and `estimated_net_savings: null`; no live provider comparison occurs.
+“Woh original architecture direction ka part hain. Current implemented scope mein container registry aur real provisioning absent hain, DNS mock-only hai. Demo GCP/Azure pricing, cost/decision logic aur safe migration simulation par focus karta hai.”
 
-Even a lower computed price does not confirm:
+**“Data permanent hai?”**
 
-- Spot capacity is available in a target zone;
-- workload architecture/OS/licensing/data are compatible;
-- interruption risk is acceptable;
-- egress, data consistency, latency, or service dependencies are safe.
+“MongoDB connected ho toh persistence MongoDB mein hoti hai. MongoDB unavailable ho toh status memory mode batata hai aur backend restart par memory history clear ho sakti hai.”
 
-Those need reliable provider evidence and workload-specific checks before any real decision.
+## 9. One-minute project explanation
 
-## 12. MongoDB and persistence
-
-`DocumentStore` attempts asynchronous connection at application startup, pings MongoDB, and creates indexes. On failure it logs a warning and switches to an in-memory store; `/api/health` identifies the mode. The memory fallback is not persistent.
-
-Indexes are prepared for these collection names:
-
-| Collection | Current status |
-|---|---|
-| `pricing_snapshots` | Index exists; no live pricing data is written |
-| `workload_configs` | Index exists; no workload CRUD endpoint/storage flow |
-| `cost_analyses` | Used by cost-calculation route |
-| `migrations` | Used by simulation routes; unique migration ID index |
-| `audit_logs` | Decision and migration actions write audit documents |
-
-The data is shared application metadata, not a distributed workload datastore. No automatic multi-region replication, cross-cloud DR, or app-state migration is implemented.
-
-## 13. Migration and DNS safety
-
-The simulation transition sequence is:
-
-```text
-PENDING → PROVISIONING → DEPLOYING → HEALTH_CHECK
-→ READY_TO_SWITCH → SWITCHING_TRAFFIC → VERIFYING → COMPLETED
-```
-
-Failure/cancellation stop the flow, and the source remains active on a failed health check. In this implementation, these are recorded simulation transitions: the labels do not mean a VM was provisioned, application data copied, or traffic actually switched. Backend rejects requests that attempt live migration.
-
-DNS adapter validates an HTTP(S) endpoint and a health flag but returns `status: simulated`; it does not contact DNS. Real DNS propagation is not instantaneous and would need independent resolution/traffic verification. A future real migration requires target health, data consistency, verified traffic switching, old workload retention, and tested rollback before completion can be reported.
-
-## 14. Security
-
-- Backend `.env` is Git-ignored; `.env.example` contains placeholders/defaults only.
-- Keep API keys, cloud identities, and MongoDB password on the backend. Never place secrets in Vite `VITE_` variables.
-- CORS uses the configured frontend origin; app has no authentication/authorization, so keep it bound to loopback for a demo.
-- No cloud resource write operation is implemented. Do not grant write permissions to this demo.
-- Use least privilege and short-lived identities for future provider integrations. Avoid root keys and globally open MongoDB network access.
-- Before any live provisioning exists, require explicit confirmation, budgets/cost controls, scoped permissions, idempotency, health gates, and rollback.
-
-## 15. Local demo flow
-
-1. Follow the PowerShell startup commands in [IMPLEMENTATION_GUIDE.md](./IMPLEMENTATION_GUIDE.md).
-2. Show Dashboard and its no-pricing warning.
-3. Show Cloud Pricing empty state and explain that no provider adapter is configured.
-4. Manually enter the example values in Cost Calculator and explain that they are for arithmetic only.
-5. Show Decision Engine staying on the current provider because no real prices exist.
-6. Create a Migration Center simulation. Advance through states and demonstrate health-check failure; source remains active.
-7. Open Analytics/Settings and explain memory vs MongoDB status and unavailable integrations.
-
-## 16. Viva questions and short answers
-
-**Q: What problem does this project target?**  
-A: Comparing cross-cloud Spot/Preemptible compute costs while accounting for workload duration and migration/transfer overhead.
-
-**Q: Why is the pricing table empty?**  
-A: No provider pricing adapters are implemented or configured. Returning no records is safer than presenting invented data as live.
-
-**Q: Does adding AWS credentials make prices appear?**  
-A: No. Current environment variables are placeholders and the pricing route does not call AWS; an adapter and tested API flow must be implemented first.
-
-**Q: How do you calculate net savings?**  
-A: Current compute cost minus target compute plus transfer, migration, and other explicitly entered costs.
-
-**Q: Why not recommend the cheapest hourly price?**  
-A: Total cost, region, instance compatibility, freshness, interruption risk, capacity, and migration overhead matter; an hourly rate alone is insufficient.
-
-**Q: Does the migration screen migrate a real workload?**  
-A: No. It advances a persisted or in-memory simulation state only. No cloud SDK or resource operation is connected.
-
-**Q: What happens when MongoDB is down?**  
-A: The backend logs the failure, reports memory-only persistence, and can continue in demo mode; records will not survive process shutdown.
-
-**Q: Is a public Azure retail price the actual bill?**  
-A: Not necessarily. Contract discounts, currency, SKU, region, usage, and other charges can change actual cost; the API is a retail-rate data source.
-
-**Q: What does the DNS adapter do?**  
-A: It validates an HTTP(S) endpoint and health flag and returns a mock result. It does not modify DNS.
-
-**Q: What is needed before enabling real migrations?**  
-A: Provider-specific provisioning, explicit authorization and cost safeguards, target/data/health validation, verified traffic switch, and a tested rollback strategy.
-
-## 17. Verification status
-
-The current repository contains tests under `backend\tests` and frontend scripts `npm run build` / `npm run lint`. Test outcomes should be reported only after running the commands on the current checkout; the documentation task does not change application code.
+> “CloudOptima ek GCP–Azure multi-cloud cost-intelligence prototype hai. Backend dono providers ke public pricing catalogs se data leta hai aur SKU, region, unit, source time aur pricing model ko common schema mein normalize karta hai. Cost calculator workload duration ke saath compute aur one-time transfer/migration estimates jodkar net savings aur break-even nikalta hai. Decision engine sirf fresh, compatible aur sufficiently verified catalog records accept karta hai aur rejection reasons bhi dikhata hai. Migration center state-machine workflow ko simulation mein demonstrate karta hai—real provisioning ya DNS switch nahi hota. Iska main design principle hai ki incomplete data par fake price ya unsafe recommendation na banayi jaye.”

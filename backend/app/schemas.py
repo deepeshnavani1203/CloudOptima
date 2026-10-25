@@ -32,6 +32,7 @@ class PriceRecord(BaseModel):
     pricing_evidence: str = ""
     native_price: float | None = Field(default=None, ge=0)
     native_unit: str | None = None
+    native_unit_description: str | None = None
     effective_at: datetime | None = None
     fetched_at: datetime | None = None
     source_url: str | None = None

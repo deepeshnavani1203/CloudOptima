@@ -128,7 +128,7 @@ td code { padding: 3px 5px; border-radius: 3px; color: #59657b; background: #f2f
 .filter-bar { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 10px; padding: 12px; margin-bottom: 12px; border: 1px solid #e4e8ef; border-radius: 7px; background: #fff; }
 .search-field,.filter-field { display: grid; gap: 5px; color: #748096; font-size: 8px; font-weight: 600; }
 .search-field { flex: 1; min-width: 180px; }
-.search-field input,.filter-field select,.candidate-select select { height: 33px; padding: 0 9px; border: 1px solid #e0e5ec; border-radius: 5px; color: #4c5a70; background: #fff; font-size: 9px; }
+.search-field input,.filter-field select,.filter-field input,.candidate-select select { height: 33px; padding: 0 9px; border: 1px solid #e0e5ec; border-radius: 5px; color: #4c5a70; background: #fff; font-size: 9px; }
 .filter-field select { min-width: 105px; }
 .provider-inline-status { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; margin: 0 0 13px; padding: 0 13px; border: 1px solid #e4e8ef; border-radius: 7px; background: #fff; }
 .provider-inline-status .provider-status-row { border: 0; }

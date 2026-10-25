@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import logging
+from collections import deque
 from datetime import datetime, timedelta, timezone
 
 from pydantic import ValidationError
@@ -14,7 +15,7 @@ from app.schemas import PriceRecord
 
 FRESHNESS_LIMIT = timedelta(hours=24)
 CACHE_TTL = timedelta(minutes=30)
-MAX_STORED_RECORDS = 1000
+MAX_STORED_RECORDS = 5000
 logger = logging.getLogger(__name__)
 
 
@@ -45,12 +46,41 @@ def _parse_time(value) -> datetime | None:
     return None
 
 
+def _interleave_providers(records: list[dict]) -> list[dict]:
+    grouped: dict[str, list[dict]] = {}
+    for record in records:
+        grouped.setdefault(str(record.get("provider") or "Other"), []).append(record)
+    for provider_records in grouped.values():
+        provider_records.sort(
+            key=lambda record: (
+                _parse_time(record.get("fetched_at"))
+                or _parse_time(record.get("observed_at"))
+                or datetime.min.replace(tzinfo=timezone.utc)
+            ),
+            reverse=True,
+        )
+
+    provider_order = [provider for provider in ("GCP", "Azure") if provider in grouped]
+    provider_order.extend(sorted(set(grouped) - set(provider_order)))
+    queues = {provider: deque(grouped[provider]) for provider in provider_order}
+    interleaved = []
+    while queues:
+        for provider in provider_order:
+            queue = queues.get(provider)
+            if queue:
+                interleaved.append(queue.popleft())
+                if not queue:
+                    del queues[provider]
+    return interleaved
+
+
 class PricingService:
     def __init__(self):
         self._cache: dict[str, tuple[datetime, list[dict]]] = {}
         self._last_success: dict[str, datetime | None] = {"GCP": None, "Azure": None}
         self._last_attempt: dict[str, datetime | None] = {"GCP": None, "Azure": None}
         self._provider_status: dict[str, dict] = {}
+        self._retry_after: dict[str, datetime | None] = {"GCP": None, "Azure": None}
         self._lock = asyncio.Lock()
 
     def status(self) -> dict:
@@ -80,6 +110,7 @@ class PricingService:
                     "cached": any(key.startswith("Azure:") and value[0] > now for key, value in self._cache.items()),
                     "error": self._provider_status.get("Azure", {}).get("error"),
                     "warnings": self._provider_status.get("Azure", {}).get("warnings", []),
+                    "retry_after": self._retry_after["Azure"],
                 },
             },
             "persistence": {"status": store.status, "mode": store.mode},
@@ -109,6 +140,24 @@ class PricingService:
                 "warnings": warnings,
                 "attempted": True,
             }
+        retry_after = self._retry_after.get(provider)
+        if retry_after and retry_after > now:
+            seconds = max(1, int((retry_after - now).total_seconds()))
+            message = f"{provider} pricing is rate limited; retry in about {seconds} seconds."
+            self._provider_status[provider] = {
+                "status": "rate_limited",
+                "error": message,
+                "warnings": [],
+            }
+            return {
+                "provider": provider,
+                "records": [],
+                "cached": False,
+                "error": message,
+                "warnings": [],
+                "attempted": False,
+            }
+        self._retry_after[provider] = None
 
         try:
             if provider == "GCP":
@@ -132,7 +181,14 @@ class PricingService:
                 "attempted": True,
             }
         except ProviderRequestError as error:
-            self._provider_status[provider] = {"status": "error", "error": str(error), "warnings": []}
+            if error.status_code == 429:
+                cooldown = error.retry_after_seconds or 60
+                self._retry_after[provider] = now + timedelta(seconds=cooldown)
+            self._provider_status[provider] = {
+                "status": "rate_limited" if error.status_code == 429 else "error",
+                "error": str(error),
+                "warnings": [],
+            }
             return {"provider": provider, "records": [], "cached": False, "error": str(error), "warnings": [], "attempted": True}
         except (AttributeError, KeyError, TypeError, ValueError, OverflowError) as error:
             logger.warning("Provider catalog parsing failed for %s (%s)", provider, type(error).__name__)
@@ -250,8 +306,9 @@ class PricingService:
             )).lower():
                 continue
             filtered.append(record)
+        ordered_records = _interleave_providers(filtered)
         return {
-            "items": filtered[offset:offset + limit],
+            "items": ordered_records[offset:offset + limit],
             "total": len(filtered),
             "limit": limit,
             "offset": offset,
