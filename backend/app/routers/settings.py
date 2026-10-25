@@ -16,11 +16,15 @@ async def health():
         "live_integrations_enabled": any(
             provider["enabled"] for provider in pricing_status["providers"].values()
         ),
-        "database": {"status": store.status, "persistence": store.mode},
+        "database": {
+            "status": store.status,
+            "persistence": store.mode,
+            "connection_error": store.connection_error,
+        },
         "integrations": {
             "gcp_pricing": pricing_status["providers"]["GCP"]["status"],
             "azure_pricing": pricing_status["providers"]["Azure"]["status"],
-            "groq_explanations": "configured_not_connected" if settings.groq_api_key else "not_configured",
+            "groq_explanations": "configured" if settings.groq_api_key else "not_configured",
             "cloud_provisioning": "disabled",
             "dns": "mock" if settings.dns_adapter == "mock" else "disabled",
         },

@@ -178,6 +178,9 @@ td code { padding: 3px 5px; border-radius: 3px; color: #59657b; background: #f2f
 .candidate-row > b { color: #44536c; }
 .candidate-row > small { grid-column: 1 / -1; color: #8792a4; font-size: 8px; line-height: 1.4; }
 .rejected-row { grid-template-columns: 75px 1fr; }
+.ai-explanation { margin-top: 10px; padding: 11px; border: 1px solid #dfe5f3; border-radius: 6px; background: #f7f8fc; color: #59677e; font-size: 9px; line-height: 1.6; }
+.ai-explanation b { color: #40527b; }
+.ai-explanation p { margin: 5px 0 0; white-space: pre-wrap; }
 .decision-result > .button { margin-top: 13px; }
 .checkbox-field { display: inline-flex; align-items: center; gap: 7px; margin: 2px 0 14px; color: #637087; font-size: 9px; }
 .checkbox-field input { accent-color: #4f69d2; }

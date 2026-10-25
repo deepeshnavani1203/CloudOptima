@@ -1,8 +1,9 @@
 from fastapi import APIRouter
 
 from app.db import store
-from app.schemas import DecisionRequest
+from app.schemas import DecisionExplanationRequest, DecisionRequest
 from app.services.decisions import recommend
+from app.services.explanations import explain_decision
 from app.services.pricing import normalize_price
 
 router = APIRouter(prefix="/api/decisions", tags=["decisions"])
@@ -30,3 +31,8 @@ async def decision_recommend(request: DecisionRequest):
         "recommended_provider": result["recommended_provider"],
     })
     return result
+
+
+@router.post("/explain")
+async def decision_explain(request: DecisionExplanationRequest):
+    return await explain_decision(request)

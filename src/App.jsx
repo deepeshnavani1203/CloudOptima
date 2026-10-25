@@ -68,7 +68,11 @@ function App() {
   const [history, setHistory] = useState({ items: [], migration_counts: {} })
   const [cost, setCost] = useState(initialCost)
   const [analysis, setAnalysis] = useState(null)
+  const [costExplanation, setCostExplanation] = useState('')
+  const [costExplanationBusy, setCostExplanationBusy] = useState(false)
   const [decision, setDecision] = useState(null)
+  const [aiExplanation, setAiExplanation] = useState('')
+  const [explanationBusy, setExplanationBusy] = useState(false)
   const [pricingBusy, setPricingBusy] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -158,10 +162,46 @@ function App() {
         )),
       })
       setAnalysis(result)
+      setCostExplanation('')
       setHistory((current) => ({ ...current, items: [result, ...(current.items || [])] }))
       notify('Estimate saved. It is based on your supplied inputs, not billing data.')
     } catch (requestError) {
       setError(`Could not calculate estimate: ${requestError.message}`)
+    }
+  }
+
+  const explainCost = async () => {
+    if (!analysis) return
+    setCostExplanationBusy(true)
+    setError('')
+    try {
+      const result = await api('/cost/explain', {
+        method: 'POST',
+        body: JSON.stringify({
+          current_provider: analysis.current_provider,
+          target_provider: analysis.target_provider,
+          current_hourly_cost: analysis.inputs.current_hourly_cost,
+          target_hourly_cost: analysis.inputs.target_hourly_cost,
+          duration_hours: analysis.inputs.duration_hours,
+          current_cost: analysis.current_cost,
+          target_compute_cost: analysis.target_compute_cost,
+          transfer_cost: analysis.transfer_cost,
+          migration_overhead: analysis.migration_overhead,
+          other_costs: analysis.other_costs,
+          target_total_cost: analysis.target_total_cost,
+          net_savings: analysis.net_savings,
+          savings_percent: analysis.savings_percent,
+          break_even_hours: analysis.break_even_hours,
+          minimum_savings_percent: analysis.minimum_savings_percent,
+          meets_savings_threshold: analysis.meets_savings_threshold,
+          missing_cost_categories: analysis.missing_cost_categories || [],
+        }),
+      })
+      setCostExplanation(result.explanation)
+    } catch (requestError) {
+      setError(`AI explanation unavailable: ${requestError.message}`)
+    } finally {
+      setCostExplanationBusy(false)
     }
   }
 
@@ -181,8 +221,41 @@ function App() {
       }
       const result = await api('/decisions/recommend', { method: 'POST', body: JSON.stringify(request) })
       setDecision(result)
+      setAiExplanation('')
     } catch (requestError) {
       setError(`Decision could not be evaluated: ${requestError.message}`)
+    }
+  }
+
+  const explainDecision = async () => {
+    if (!decision) return
+    setExplanationBusy(true)
+    setError('')
+    try {
+      const toExplanationCandidate = (candidate) => ({
+        provider: candidate.provider,
+        instance_type: candidate.instance_type || 'Unknown',
+        eligible: Boolean(candidate.eligible),
+        reason: candidate.reason || '',
+        hourly_price: candidate.hourly_price ?? null,
+        currency: candidate.currency ?? null,
+      })
+      const result = await api('/decisions/explain', {
+        method: 'POST',
+        body: JSON.stringify({
+          recommended_provider: decision.recommended_provider,
+          reason: decision.reason,
+          estimated_net_savings: decision.estimated_net_savings,
+          candidates: (decision.candidates || []).slice(0, 25).map(toExplanationCandidate),
+          rejected_candidates: (decision.rejected_candidates || []).slice(0, 25).map(toExplanationCandidate),
+          limitations: decision.limitations || [],
+        }),
+      })
+      setAiExplanation(result.explanation)
+    } catch (requestError) {
+      setError(`AI explanation unavailable: ${requestError.message}`)
+    } finally {
+      setExplanationBusy(false)
     }
   }
 
@@ -283,10 +356,12 @@ function App() {
           />}
           {page === 'Cost calculator' && <CalculatorPage
             cost={cost} setCost={setCost} calculate={calculate} analysis={analysis} pricing={pricing} history={history.items || []}
+            explain={explainCost} explanation={costExplanation} explanationBusy={costExplanationBusy}
           />}
           {page === 'Best cloud decision' && <DecisionPage
             inputs={decisionInputs} setInputs={setDecisionInputs} run={runDecision} result={decision}
-            pricing={pricing} prepareMigration={prepareMigration}
+            pricing={pricing} prepareMigration={prepareMigration} explain={explainDecision}
+            explanation={aiExplanation} explanationBusy={explanationBusy}
           />}
           {page === 'Migration center' && <MigrationPage
             migrations={migrations} inputs={migrationInputs} setInputs={setMigrationInputs}
@@ -433,7 +508,7 @@ function PriceTable({ items, compact = false }) {
   </table></div>
 }
 
-function CalculatorPage({ cost, setCost, calculate, analysis, pricing, history }) {
+function CalculatorPage({ cost, setCost, calculate, analysis, pricing, history, explain, explanation, explanationBusy }) {
   const candidates = pricing.filter((item) => item.hourly_price != null && item.currency === 'USD' && item.pricing_model_status === 'verified')
   const update = (key) => (event) => setCost((current) => ({
     ...current,
@@ -470,7 +545,7 @@ function CalculatorPage({ cost, setCost, calculate, analysis, pricing, history }
         <p className="assumption-note">Transfer, migration, and other costs are added once. Taxes, discounts, storage, support, and licensing are excluded unless included in your own estimates.</p>
         <button className="button primary" type="submit">Save cost estimate →</button>
       </form>
-      <CostResult analysis={analysis} />
+      <CostResult analysis={analysis} explain={explain} explanation={explanation} explanationBusy={explanationBusy} />
     </div>
     <section className="panel table-panel history-panel"><div className="panel-heading"><div><h2>Saved cost estimates</h2><p>{history.length} saved in current persistence mode</p></div></div><AnalysisTable items={history} /></section>
   </>
@@ -479,13 +554,13 @@ function CalculatorPage({ cost, setCost, calculate, analysis, pricing, history }
 function ProviderOptions() { return providers.map((provider) => <option key={provider} value={provider}>{provider}</option>) }
 function Field({ label, prefix, suffix, children }) { return <label className="field"><span>{label}</span><div className="input-wrap">{prefix && <span>{prefix}</span>}{children}{suffix && <span>{suffix}</span>}</div></label> }
 
-function CostResult({ analysis }) {
+function CostResult({ analysis, explain, explanation, explanationBusy }) {
   if (!analysis) return <section className="panel result-panel empty-result"><span className="result-placeholder">⌗</span><h2>Your estimate appears here</h2><p>Submit the assumptions to see the full cost breakdown and save the result.</p></section>
   const rows = [['Current compute', analysis.current_cost], ['Target compute', analysis.target_compute_cost], ['Transfer estimate', analysis.transfer_cost], ['Migration overhead', analysis.migration_overhead], ['Other estimated costs', analysis.other_costs]]
-  return <section className="panel result-panel"><div className="result-heading"><div><span className="eyebrow">ESTIMATED OUTCOME</span><h2>Cost breakdown</h2></div><StatusBadge value="estimate" /></div><div className="breakdown">{rows.map(([label, value]) => <div key={label}><span>{label}</span><b>{formatMoney(value, 2)}</b></div>)}<div className="breakdown-total"><span>Target total cost</span><b>{formatMoney(analysis.target_total_cost, 2)}</b></div></div><div className={`net-result ${analysis.net_savings < 0 ? 'loss' : ''}`}><span>Estimated net savings</span><strong>{formatMoney(analysis.net_savings, 2)}</strong><small>{Number(analysis.savings_percent).toFixed(2)}% · assumptions only</small></div><div className="break-even"><span>Break-even duration</span><b>{analysis.break_even_hours == null ? 'Not reached' : `${Number(analysis.break_even_hours).toFixed(2)} hours`}</b></div><p className="result-note">Estimate only; not an actual bill or guaranteed savings. Excluded categories may materially change the outcome.</p></section>
+  return <section className="panel result-panel"><div className="result-heading"><div><span className="eyebrow">ESTIMATED OUTCOME</span><h2>Cost breakdown</h2></div><StatusBadge value="estimate" /></div><div className="breakdown">{rows.map(([label, value]) => <div key={label}><span>{label}</span><b>{formatMoney(value, 2)}</b></div>)}<div className="breakdown-total"><span>Target total cost</span><b>{formatMoney(analysis.target_total_cost, 2)}</b></div></div><div className={`net-result ${analysis.net_savings < 0 ? 'loss' : ''}`}><span>Estimated net savings</span><strong>{formatMoney(analysis.net_savings, 2)}</strong><small>{Number(analysis.savings_percent).toFixed(2)}% · assumptions only</small></div><div className="break-even"><span>Break-even duration</span><b>{analysis.break_even_hours == null ? 'Not reached' : `${Number(analysis.break_even_hours).toFixed(2)} hours`}</b></div><p className="result-note">Optional AI explanation sends this estimate summary to Groq. It does not change the calculation.</p><button className="button secondary full" onClick={explain} disabled={explanationBusy}>{explanationBusy ? 'Generating explanation…' : 'Explain this estimate with AI'}</button>{explanation && <div className="ai-explanation"><b>AI explanation · Groq</b><p>{explanation}</p></div>}<p className="result-note">Estimate only; not an actual bill or guaranteed savings. Excluded categories may materially change the outcome.</p></section>
 }
 
-function DecisionPage({ inputs, setInputs, run, result, pricing, prepareMigration }) {
+function DecisionPage({ inputs, setInputs, run, result, pricing, prepareMigration, explain, explanation, explanationBusy }) {
   const update = (key) => (event) => setInputs((current) => ({ ...current, [key]: event.target.type === 'checkbox' ? event.target.checked : event.target.value }))
   return <>
     <PageHeader eyebrow="RULE-BASED COMPARISON" title="Best cloud decision" subtitle="Recommendations require verified pricing, known capacity, compatible region, freshness, and like-for-like pricing models." />
@@ -507,14 +582,14 @@ function DecisionPage({ inputs, setInputs, run, result, pricing, prepareMigratio
         <label className="checkbox-field"><input type="checkbox" checked={inputs.workload_tolerates_interruptions} onChange={update('workload_tolerates_interruptions')} />Workload can tolerate Spot/preemptible interruption</label>
         <button className="button primary" type="submit">Evaluate catalog candidates →</button>
       </form>
-      <DecisionResult result={result} pricingCount={pricing.length} prepareMigration={prepareMigration} currentProvider={inputs.current_provider} />
+      <DecisionResult result={result} pricingCount={pricing.length} prepareMigration={prepareMigration} currentProvider={inputs.current_provider} explain={explain} explanation={explanation} explanationBusy={explanationBusy} />
     </div>
   </>
 }
 
-function DecisionResult({ result, pricingCount, prepareMigration, currentProvider }) {
+function DecisionResult({ result, pricingCount, prepareMigration, currentProvider, explain, explanation, explanationBusy }) {
   if (!result) return <section className="panel decision-result empty-result"><span className="result-placeholder">✳</span><h2>No decision run yet</h2><p>The engine will stay on the current provider unless valid like-for-like candidates qualify.</p><p>{pricingCount} stored catalog records available for evaluation.</p></section>
-  return <section className="panel decision-result"><span className="eyebrow">DETERMINISTIC RESULT</span><div className="decision-provider"><span className="provider-logo">{result.recommended_provider}</span><div><small>RECOMMENDATION</small><h2>{result.recommended_provider}</h2></div><StatusBadge value={result.mode || 'unavailable'} /></div><p>{result.reason}</p><div className="decision-summary"><span>Estimated net savings</span><b>{result.estimated_net_savings == null ? 'Unavailable' : formatMoney(result.estimated_net_savings, 2)}</b></div><h3>Evaluated candidates ({result.candidates?.length || 0})</h3>{result.candidates?.length ? result.candidates.map((item, index) => <div className="candidate-row" key={`${item.provider}-${item.sku_id}-${index}`}><span><i style={{ background: colors[item.provider] }} />{item.provider} · {item.instance_type}</span><b>{formatMoney(item.hourly_price, 5)}</b><small>{item.reason}</small></div>) : <EmptyState title="No eligible candidate" text="No current record has all verified hourly price, USD currency, region, pricing model, freshness, and capacity data required for this workload." />}<h3>Excluded observations ({result.rejected_candidates?.length || 0})</h3>{result.rejected_candidates?.slice(0, 8).map((item, index) => <div className="candidate-row rejected-row" key={`${item.provider}-${index}`}><span>{item.provider}</span><small>{item.reason}</small></div>)}<button className="button secondary full" disabled={!result.candidates?.some((item) => item.eligible)} onClick={() => prepareMigration(currentProvider, result.recommended_provider)}>Prepare migration simulation</button><p className="result-note">The engine never provisions resources. Retail rates are not actual bills or negotiated prices.</p></section>
+  return <section className="panel decision-result"><span className="eyebrow">DETERMINISTIC RESULT</span><div className="decision-provider"><span className="provider-logo">{result.recommended_provider}</span><div><small>RECOMMENDATION</small><h2>{result.recommended_provider}</h2></div><StatusBadge value={result.mode || 'unavailable'} /></div><p>{result.reason}</p><div className="decision-summary"><span>Estimated net savings</span><b>{result.estimated_net_savings == null ? 'Unavailable' : formatMoney(result.estimated_net_savings, 2)}</b></div><h3>Evaluated candidates ({result.candidates?.length || 0})</h3>{result.candidates?.length ? result.candidates.map((item, index) => <div className="candidate-row" key={`${item.provider}-${item.sku_id}-${index}`}><span><i style={{ background: colors[item.provider] }} />{item.provider} · {item.instance_type}</span><b>{formatMoney(item.hourly_price, 5)}</b><small>{item.reason}</small></div>) : <EmptyState title="No eligible candidate" text="No current record has all verified hourly price, USD currency, region, pricing model, freshness, and capacity data required for this workload." />}<h3>Excluded observations ({result.rejected_candidates?.length || 0})</h3>{result.rejected_candidates?.slice(0, 8).map((item, index) => <div className="candidate-row rejected-row" key={`${item.provider}-${index}`}><span>{item.provider}</span><small>{item.reason}</small></div>)}<p className="result-note">Optional AI explanation sends this decision summary to Groq. It does not affect the numerical result.</p><button className="button secondary full" onClick={explain} disabled={explanationBusy}>{explanationBusy ? 'Generating explanation…' : 'Explain decision with AI'}</button>{explanation && <div className="ai-explanation"><b>AI explanation · Groq</b><p>{explanation}</p></div>}<button className="button secondary full" disabled={!result.candidates?.some((item) => item.eligible)} onClick={() => prepareMigration(currentProvider, result.recommended_provider)}>Prepare migration simulation</button><p className="result-note">The rules engine—not AI—makes the recommendation. It never provisions resources. Retail rates are not actual bills or negotiated prices.</p></section>
 }
 
 function MigrationPage({ migrations, inputs, setInputs, create, advance, cancel, healthCheckPassed, setHealthCheckPassed }) {
@@ -563,7 +638,7 @@ function SettingsPage({ status, refresh, busy }) {
     <PageHeader eyebrow="CONFIGURATION STATUS" title="Settings & integrations" subtitle="Configuration and operational health only. Secrets are never returned to this page." action={<button className="button secondary" onClick={refresh} disabled={busy}>{busy ? 'Refreshing…' : '↻ Refresh catalogs'}</button>} />
     <div className="settings-grid">
       <section className="panel settings-panel"><div className="panel-heading"><div><h2>Provider pricing</h2><p>Backend catalog connection state and last successful fetch</p></div></div><ProviderStatusRows providers={status.pricing?.providers || {}} /><div className="settings-assumption"><span>Pricing source</span><b>Public retail catalogs</b></div><div className="settings-assumption"><span>Authentication</span><b>GCP API key is backend-only; Azure public catalog needs no subscription ID</b></div><div className="settings-assumption"><span>Pricing disclaimer</span><b>Not negotiated rates or actual usage bills</b></div></section>
-      <section className="panel settings-panel"><div className="panel-heading"><div><h2>Persistence & runtime</h2><p>Degraded mode is reported explicitly</p></div></div><StatusRow name="FastAPI runtime" detail={`Mode: ${status.mode || 'unknown'}`} value="connected" /><StatusRow name="MongoDB" detail={`Persistence: ${status.database?.persistence || 'unknown'}`} value={status.database?.status || 'unknown'} /><StatusRow name="Groq explanations" detail="Optional explanation integration is not used for numerical pricing decisions." value={status.integrations?.groq_explanations || 'not_configured'} /><StatusRow name="Cloud provisioning" detail="Disabled; migration workflow is simulation-only." value="disabled" /><StatusRow name="DNS" detail="Mock behavior only; no production traffic changes." value={status.integrations?.dns || 'mock'} /></section>
+      <section className="panel settings-panel"><div className="panel-heading"><div><h2>Persistence & runtime</h2><p>Degraded mode is reported explicitly</p></div></div><StatusRow name="FastAPI runtime" detail={`Mode: ${status.mode || 'unknown'}`} value="connected" /><StatusRow name="MongoDB" detail={`Persistence: ${status.database?.persistence || 'unknown'}${status.database?.connection_error ? ` · ${status.database.connection_error}` : ''}`} value={status.database?.status || 'unknown'} /><StatusRow name="Groq explanations" detail="Optional explanations for cost estimates and decisions; AI does not calculate costs or choose providers." value={status.integrations?.groq_explanations || 'not_configured'} /><StatusRow name="Cloud provisioning" detail="Disabled; migration workflow is simulation-only." value="disabled" /><StatusRow name="DNS" detail="Mock behavior only; no production traffic changes." value={status.integrations?.dns || 'mock'} /></section>
     </div>
   </>
 }

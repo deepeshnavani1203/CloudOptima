@@ -100,6 +100,13 @@ Rounding/UI formatting se last decimal thoda alag dikh sakta hai.
 
 Negative savings error zaroori nahi. Iska matlab selected duration/costs ke hisaab se target total current cost se zyada hai. Transfer/overhead ko one-time add karne se chhote ya short workloads mein ye ho sakta hai. Example ke liye upar wali values use karo.
 
+**AI explanation dikhana ho toh**
+
+- Result ke neeche **Explain this estimate with AI** dabao.
+- Groq current/target totals, line items, net savings, threshold aur excluded-cost caveats ko simple words mein samjhayega. Negative result par woh target option kitna mehenga hai woh explain kar sakta hai.
+- Ye optional explanation hai: AI number calculate/change nahi karta; calculation wahi deterministic backend formula hai.
+- Button dabane par cost summary Groq API ko bhej di jati hai. Demo data hi use karo; sensitive workload/provider details mat daalo.
+
 ### 4. Best cloud decision — explainable candidate evaluation
 
 Ye calculator se alag hai: decision engine sirf cheaper rate nahi dekhta, pehle workload fit aur evidence check karta hai.
@@ -126,6 +133,8 @@ Ye calculator se alag hai: decision engine sirf cheaper rate nahi dekhta, pehle 
 **Sir ko kya bolo**
 
 > “Recommendation rules-based aur explainable hai. Candidate ko region, fresh data, USD hourly rate, verified pricing model, required vCPU/RAM aur Spot interruption tolerance jaise checks pass karne hote hain. Required specs missing hon toh engine guess nahi karta; candidate reject karke reason deta hai.”
+
+Result ke neeche **Explain decision with AI** optional hai. Isse Groq recommendation aur rejection reasons ko plain language mein samjhayega; provider choose karne wala numerical/rules-based decision AI nahi banata. Click par limited decision summary Groq ko bheji jati hai.
 
 **Expected limitation**
 
@@ -165,11 +174,11 @@ Calculator save karne, decision evaluate karne, aur migration simulation banane 
 
 ### 7. Settings — integration aur limitations
 
-Provider status aur last successful fetch dikhhao. Saath mein database/persistence mode, optional Groq status, cloud provisioning disabled, aur DNS mock status explain karo.
+Provider status aur last successful fetch dikhhao. Saath mein database/persistence mode, Groq configured status, cloud provisioning disabled, aur DNS mock status explain karo.
 
 **Sir ko kya bolo**
 
-> “Settings secrets show nahi karta. GCP key backend-side configuration hai; Azure public retail catalog ko subscription ID ke bina query kiya ja sakta hai. Current build mein provisioning disabled aur DNS mock-only hai. MongoDB unavailable ho toh app memory mode ko explicitly report karti hai.”
+> “Settings secrets show nahi karta. GCP key backend-side configuration hai; Azure public retail catalog ko subscription ID ke bina query kiya ja sakta hai. Groq optional explanations ke liye hai, calculations ke liye nahi. Current build mein provisioning disabled aur DNS mock-only hai. MongoDB unavailable ho toh app memory mode ko explicitly report karti hai.”
 
 ## 60-second opening script
 

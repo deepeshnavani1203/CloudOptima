@@ -4,8 +4,9 @@ from math import isclose
 from fastapi import APIRouter, HTTPException
 
 from app.db import store
-from app.schemas import CostRequest
+from app.schemas import CostExplanationRequest, CostRequest
 from app.services.costs import calculate_costs
+from app.services.explanations import explain_cost
 from app.services.pricing import is_fresh, normalize_price
 
 router = APIRouter(prefix="/api/cost", tags=["cost analysis"])
@@ -37,7 +38,8 @@ async def cost_calculate(request: CostRequest):
     result["mode"] = "estimate"
     result["persistence"] = {"status": store.status, "mode": store.mode}
     result["pricing_snapshot_ids"] = snapshot_ids
-    document = {**result, "inputs": request.model_dump(mode="json")}
+    result["inputs"] = request.model_dump(mode="json")
+    document = dict(result)
     await store.insert("cost_analyses", result["created_at"].isoformat(), document)
     await store.insert("audit_logs", f"cost:{result['created_at'].isoformat()}", {
         "resource_id": "cost-analysis",
@@ -45,3 +47,8 @@ async def cost_calculate(request: CostRequest):
         "created_at": result["created_at"],
     })
     return result
+
+
+@router.post("/explain")
+async def cost_explain(request: CostExplanationRequest):
+    return await explain_cost(request)

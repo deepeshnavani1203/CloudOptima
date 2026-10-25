@@ -6,6 +6,8 @@ from fastapi.testclient import TestClient
 from app.db import store
 from app.config import settings
 from app.main import app
+from app.routers import costs as costs_router
+from app.routers import decisions as decisions_router
 from app.services import pricing
 
 
@@ -14,6 +16,7 @@ def client(monkeypatch):
     async def connect():
         store.mode = "memory"
         store.status = "unavailable"
+        store.connection_error = "connection_failed"
         store._memory.clear()
 
     async def close():
@@ -42,6 +45,7 @@ def test_health_and_pricing_report_provider_status_without_exposing_credentials(
     assert health.status_code == 200
     assert health.json()["mode"] == "demo"
     assert health.json()["database"]["persistence"] == "memory"
+    assert health.json()["database"]["connection_error"] == "connection_failed"
     pricing = client.get("/api/pricing").json()
     assert pricing["mode"] == "demo"
     assert "No pricing data" in pricing["warnings"][0]
@@ -168,6 +172,61 @@ def test_recommendation_stays_put_without_prices_and_not_found_migration(client)
     assert response.json()["estimated_net_savings"] is None
     assert response.json()["candidates"] == []
     assert client.get("/api/migrations/missing").status_code == 404
+
+
+def test_decision_explanation_endpoint_returns_optional_groq_explanation(client, monkeypatch):
+    async def explain(_request):
+        return {"explanation": "The current provider remains the safest supported choice.", "model": "test-model"}
+
+    monkeypatch.setattr(decisions_router, "explain_decision", explain)
+    response = client.post("/api/decisions/explain", json={
+        "recommended_provider": "GCP",
+        "reason": "No candidate passed all requirements.",
+        "estimated_net_savings": None,
+        "candidates": [],
+        "rejected_candidates": [{
+            "provider": "Azure",
+            "eligible": False,
+            "reason": "Verified machine specifications are unavailable.",
+        }],
+        "limitations": ["Retail prices are estimates."],
+    })
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "explanation": "The current provider remains the safest supported choice.",
+        "model": "test-model",
+    }
+
+
+def test_cost_explanation_endpoint_accepts_negative_savings(client, monkeypatch):
+    async def explain(request):
+        assert request.net_savings == -496.6
+        return {"explanation": "The target estimate is higher.", "model": "test-model"}
+
+    monkeypatch.setattr(costs_router, "explain_cost", explain)
+    response = client.post("/api/cost/explain", json={
+        "current_provider": "GCP",
+        "target_provider": "Azure",
+        "current_hourly_cost": 0.12,
+        "target_hourly_cost": 0.8,
+        "duration_hours": 720,
+        "current_cost": 86.4,
+        "target_compute_cost": 576,
+        "transfer_cost": 5,
+        "migration_overhead": 2,
+        "other_costs": 0,
+        "target_total_cost": 583,
+        "net_savings": -496.6,
+        "savings_percent": -574.77,
+        "break_even_hours": None,
+        "minimum_savings_percent": 10,
+        "meets_savings_threshold": False,
+        "missing_cost_categories": ["Taxes and negotiated discounts"],
+    })
+
+    assert response.status_code == 200
+    assert response.json()["explanation"] == "The target estimate is higher."
 
 
 def test_decision_endpoint_loads_validated_snapshots_and_saves_references(client):

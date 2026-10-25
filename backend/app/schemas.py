@@ -80,6 +80,50 @@ class DecisionRequest(BaseModel):
     workload_tolerates_interruptions: bool | None = None
 
 
+class DecisionExplanationCandidate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: Provider
+    instance_type: str = Field(default="Unknown", max_length=160)
+    eligible: bool
+    reason: str = Field(max_length=1000)
+    hourly_price: float | None = Field(default=None, ge=0)
+    currency: str | None = Field(default=None, pattern=r"^[A-Z]{3}$")
+
+
+class DecisionExplanationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    recommended_provider: Provider
+    reason: str = Field(max_length=2000)
+    estimated_net_savings: float | None = None
+    candidates: list[DecisionExplanationCandidate] = Field(default_factory=list, max_length=25)
+    rejected_candidates: list[DecisionExplanationCandidate] = Field(default_factory=list, max_length=25)
+    limitations: list[str] = Field(default_factory=list, max_length=10)
+
+
+class CostExplanationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    current_provider: Provider
+    target_provider: Provider
+    current_hourly_cost: float = Field(ge=0)
+    target_hourly_cost: float = Field(ge=0)
+    duration_hours: float = Field(gt=0)
+    current_cost: float = Field(ge=0)
+    target_compute_cost: float = Field(ge=0)
+    transfer_cost: float = Field(ge=0)
+    migration_overhead: float = Field(ge=0)
+    other_costs: float = Field(ge=0)
+    target_total_cost: float = Field(ge=0)
+    net_savings: float
+    savings_percent: float
+    break_even_hours: float | None = Field(default=None, ge=0)
+    minimum_savings_percent: float = Field(ge=0, le=100)
+    meets_savings_threshold: bool
+    missing_cost_categories: list[str] = Field(default_factory=list, max_length=20)
+
+
 class MigrationCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
