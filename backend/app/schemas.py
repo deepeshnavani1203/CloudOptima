@@ -131,10 +131,14 @@ class MigrationCreate(BaseModel):
     target_provider: Provider
     simulation: bool = True
     workload_name: str = Field(default="unspecified", min_length=1, max_length=120)
+    workflow_type: Literal["standard", "spot"] = "standard"
 
 
 class MigrationAdvance(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     health_check_passed: bool = True
+    backup_confirmed: bool = False
+    approval_confirmed: bool = False
+    rollback_confirmed: bool = False
     confirm_live: bool = False

@@ -146,13 +146,107 @@ def test_migration_api_enforces_simulation_and_health_gate(client):
         "simulation": False,
     }).status_code == 403
 
-    for _ in range(3):
-        result = client.post(f"/api/migrations/{migration_id}/advance", json={})
+    for index in range(3):
+        result = client.post(
+            f"/api/migrations/{migration_id}/advance",
+            json={"backup_confirmed": index == 0},
+        )
         assert result.status_code == 200
     failed = client.post(f"/api/migrations/{migration_id}/advance", json={"health_check_passed": False})
     assert failed.status_code == 200
     assert failed.json()["state"] == "FAILED"
     assert failed.json()["source_workload_active"] is True
+    assert failed.json()["safety_checks"][-1]["check"] == "TARGET_HEALTH_CHECK"
+
+
+def test_migration_api_enforces_backup_approval_and_rollback_gates(client):
+    created = client.post("/api/migrations", json={
+        "source_provider": "GCP",
+        "target_provider": "Azure",
+        "simulation": True,
+        "workload_name": "safety-demo",
+    })
+    migration_id = created.json()["migration_id"]
+
+    assert client.post(f"/api/migrations/{migration_id}/advance", json={}).status_code == 409
+    assert client.post(
+        f"/api/migrations/{migration_id}/advance",
+        json={"backup_confirmed": True},
+    ).status_code == 200
+    for _ in range(2):
+        assert client.post(f"/api/migrations/{migration_id}/advance", json={}).status_code == 200
+
+    # Complete the pre-switch health gate and reach the approval gate.
+    assert client.post(f"/api/migrations/{migration_id}/advance", json={}).json()["state"] == "READY_TO_SWITCH"
+    assert client.post(f"/api/migrations/{migration_id}/advance", json={}).status_code == 409
+    approved = client.post(
+        f"/api/migrations/{migration_id}/advance",
+        json={"approval_confirmed": True},
+    )
+    assert approved.json()["state"] == "SWITCHING_TRAFFIC"
+    assert client.post(f"/api/migrations/{migration_id}/advance", json={}).json()["state"] == "VERIFYING"
+
+    rollback = client.post(
+        f"/api/migrations/{migration_id}/advance",
+        json={"health_check_passed": False},
+    )
+    assert rollback.json()["state"] == "ROLLING_BACK"
+    completed = client.post(f"/api/migrations/{migration_id}/advance", json={})
+    assert completed.json()["state"] == "ROLLED_BACK"
+    assert completed.json()["source_workload_active"] is True
+    checks = completed.json()["safety_checks"]
+    assert [check["check"] for check in checks] == [
+        "BACKUP_CONFIRMATION",
+        "TARGET_HEALTH_CHECK",
+        "TRAFFIC_SWITCH_APPROVAL",
+        "POST_SWITCH_HEALTH_CHECK",
+    ]
+    assert [check["status"] for check in checks] == ["PASSED", "PASSED", "APPROVED", "FAILED"]
+    assert all(check["at"] for check in checks)
+    assert completed.json()["history"][-1]["at"]
+    assert "source" in completed.json()["history"][-1]["message"].lower()
+
+
+def test_spot_migration_api_persists_gated_simulation_and_rollback(client):
+    created = client.post("/api/migrations", json={
+        "source_provider": "GCP",
+        "target_provider": "Azure",
+        "simulation": True,
+        "workflow_type": "spot",
+    })
+    assert created.status_code == 201
+    migration_id = created.json()["migration_id"]
+    assert created.json()["state"] == "PRICE_ALERT"
+    assert client.post(f"/api/migrations/{migration_id}/advance", json={}).json()["state"] == "TARGET_SELECTION"
+    assert client.post(f"/api/migrations/{migration_id}/advance", json={}).json()["state"] == "BACKUP_CONFIRMATION"
+    assert client.post(f"/api/migrations/{migration_id}/advance", json={}).status_code == 409
+    assert client.post(
+        f"/api/migrations/{migration_id}/advance",
+        json={"backup_confirmed": True},
+    ).json()["state"] == "HEALTH_CHECK"
+    assert client.post(
+        f"/api/migrations/{migration_id}/advance",
+        json={"health_check_passed": True},
+    ).json()["state"] == "APPROVAL_GATE"
+    assert client.post(f"/api/migrations/{migration_id}/advance", json={}).status_code == 409
+    assert client.post(
+        f"/api/migrations/{migration_id}/advance",
+        json={"approval_confirmed": True},
+    ).json()["state"] == "SIMULATED_TRAFFIC_SWITCH"
+    assert client.post(f"/api/migrations/{migration_id}/advance", json={}).json()["state"] == "VERIFICATION"
+    failed = client.post(
+        f"/api/migrations/{migration_id}/advance",
+        json={"health_check_passed": False},
+    )
+    assert failed.json()["state"] == "VERIFICATION_FAILED"
+    rollback = client.post(
+        f"/api/migrations/{migration_id}/advance",
+        json={"rollback_confirmed": True},
+    )
+    assert rollback.json()["state"] == "ROLLING_BACK"
+    rolled_back = client.post(f"/api/migrations/{migration_id}/advance", json={})
+    assert rolled_back.json()["state"] == "ROLLED_BACK"
+    assert rolled_back.json()["source_workload_active"] is True
 
 
 def test_recommendation_stays_put_without_prices_and_not_found_migration(client):

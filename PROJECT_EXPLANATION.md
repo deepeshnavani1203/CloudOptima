@@ -91,9 +91,9 @@ Savings negative bhi ho sakti hai; iska matlab target compute plus one-time expe
 
 `PENDING → PROVISIONING → DEPLOYING → HEALTH_CHECK → READY_TO_SWITCH → SWITCHING_TRAFFIC → VERIFYING → COMPLETED`
 
-UI se state advance hoti hai. Health-check gate fail karne par simulation `FAILED` hoti hai aur source workload active bataya jata hai. Active simulation cancel bhi ho sakti hai. Har transition history mein record hoti hai.
+UI aur wahi existing advance API use karke state advance hoti hai. `PENDING` se pehle explicit simulated backup confirmation aur `READY_TO_SWITCH` se pehle explicit traffic-switch approval required hai; backend dono gates enforce karta hai. `HEALTH_CHECK` par simulated target-health result record hota hai: failure par `FAILED` aur source recovery target rehta hai. `VERIFYING` par simulated post-switch health pass ho toh `COMPLETED`; fail ho toh `ROLLING_BACK → ROLLED_BACK`, source ko intended recovery target dikhate hue. Har state, safety-check result, timestamp aur failure/rollback reason timeline/history mein record hota hai. Active simulation cancel bhi ho sakti hai.
 
-**Safety boundary:** Ye state labels workflow explain karne ke liye hain. Current code cloud resources provision/deploy nahi karta, application migrate nahi karta, aur real traffic switch nahi karta. Live operation disabled hai.
+**Safety boundary:** Backup, target health, approval, verification aur rollback sab `SIMULATED` hain. Ye state labels workflow explain karte hain; current code real backup, monitoring probe, cloud resource provisioning/deployment, application/data migration, ya traffic/DNS switch nahi karta. Live operation disabled hai.
 
 ### E. Container registry / image movement
 

@@ -5,14 +5,18 @@ const API = import.meta.env.VITE_API_URL || '/api'
 const navigation = [
   ['Overview', '⌂'],
   ['Cloud pricing', '◈'],
+  ['Price Arbitrage Monitor', '↗'],
   ['Cost calculator', '⌗'],
   ['Best cloud decision', '✳'],
   ['Migration center', '⇄'],
+  ['Spot Migration Simulator', '⇆'],
+  ['Cost Savings & Evaluation', '▤'],
   ['Analytics & history', '▥'],
   ['Settings', '⚙'],
 ]
 const providers = ['GCP', 'Azure']
-const colors = { GCP: '#4285f4', Azure: '#16a6a1' }
+const colors = { AWS: '#e99b2f', GCP: '#4285f4', Azure: '#16a6a1' }
+const migrationProviders = ['AWS', 'GCP', 'Azure']
 const formatMoney = (value, digits = 4, currency = 'USD') => {
   if (value == null || !Number.isFinite(Number(value))) return '—'
   try {
@@ -27,7 +31,11 @@ const formatMoney = (value, digits = 4, currency = 'USD') => {
   }
 }
 const formatDate = (value) => value ? new Date(value).toLocaleString() : 'Not fetched'
-const terminalStates = ['COMPLETED', 'FAILED', 'CANCELLED']
+const priceKey = (item) => item.snapshot_id || [
+  item.provider, item.region, item.instance_type, item.sku_id, item.pricing_type,
+  item.hourly_price, item.observed_at,
+].join('|')
+const terminalStates = ['COMPLETED', 'FAILED', 'CANCELLED', 'ROLLED_BACK']
 const initialCost = {
   current_provider: 'GCP',
   current_hourly_cost: '',
@@ -73,13 +81,14 @@ function App() {
   const [decision, setDecision] = useState(null)
   const [aiExplanation, setAiExplanation] = useState('')
   const [explanationBusy, setExplanationBusy] = useState(false)
+  const [reportAnalysis, setReportAnalysis] = useState(null)
+  const [reportBusy, setReportBusy] = useState(false)
   const [pricingBusy, setPricingBusy] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [toast, setToast] = useState('')
   const [region, setRegion] = useState('')
   const [azureRegion, setAzureRegion] = useState('eastus')
-  const [healthCheckPassed, setHealthCheckPassed] = useState(true)
   const [decisionInputs, setDecisionInputs] = useState({
     current_provider: 'GCP',
     current_hourly_cost: '',
@@ -278,11 +287,11 @@ function App() {
     }
   }
 
-  const advanceMigration = async (migration) => {
+  const advanceMigration = async (migration, safety = {}) => {
     try {
       const result = await api(`/migrations/${migration.migration_id}/advance`, {
         method: 'POST',
-        body: JSON.stringify({ health_check_passed: healthCheckPassed, confirm_live: false }),
+        body: JSON.stringify({ health_check_passed: true, confirm_live: false, ...safety }),
       })
       setMigrations((current) => current.map((item) => item.migration_id === result.migration_id ? result : item))
     } catch (requestError) {
@@ -296,6 +305,56 @@ function App() {
       setMigrations((current) => current.map((item) => item.migration_id === result.migration_id ? result : item))
     } catch (requestError) {
       setError(`Simulation was not cancelled: ${requestError.message}`)
+    }
+  }
+
+  const startSpotSimulation = async (sourceProvider, targetProvider) => {
+      setError('')
+      try {
+        const result = await api('/migrations', {
+          method: 'POST',
+          body: JSON.stringify({
+            source_provider: sourceProvider,
+            target_provider: targetProvider,
+            workload_name: 'Spot migration simulation',
+            workflow_type: 'spot',
+            simulation: true,
+          }),
+        })
+        setMigrations((current) => [result, ...current])
+        notify('Spot simulation started. No cloud resources were moved.')
+        return result
+      } catch (requestError) {
+        setError(`Spot simulation could not start: ${requestError.message}`)
+        return null
+      }
+    }
+
+  const runSavingsReport = async (baseline, target, migrationOverhead) => {
+      setReportBusy(true)
+      setError('')
+      try {
+        const result = await api('/cost/calculate', {
+          method: 'POST',
+          body: JSON.stringify({
+            current_provider: baseline.provider,
+            target_provider: target.provider,
+            current_hourly_cost: baseline.hourly_price,
+            target_hourly_cost: target.hourly_price,
+            duration_hours: 730,
+            transfer_cost: 0,
+            migration_overhead: Number(migrationOverhead),
+            other_costs: 0,
+            minimum_savings_percent: 0,
+            pricing_snapshot_id: target.snapshot_id || null,
+          }),
+        })
+        setReportAnalysis({ ...result, baseline_record: baseline, target_record: target })
+        notify('Evaluation estimate calculated and saved using the existing cost service.')
+      } catch (requestError) {
+        setError(`Cost evaluation could not be calculated: ${requestError.message}`)
+      } finally {
+        setReportBusy(false)
     }
   }
 
@@ -354,6 +413,10 @@ function App() {
             refresh={refreshPricing} region={region} setRegion={setRegion}
             azureRegion={azureRegion} setAzureRegion={setAzureRegion}
           />}
+          {page === 'Price Arbitrage Monitor' && <PriceArbitragePage
+            pricing={pricing} status={status.pricing || { providers: {} }} loading={loading}
+            busy={pricingBusy} refresh={refreshPricing}
+          />}
           {page === 'Cost calculator' && <CalculatorPage
             cost={cost} setCost={setCost} calculate={calculate} analysis={analysis} pricing={pricing} history={history.items || []}
             explain={explainCost} explanation={costExplanation} explanationBusy={costExplanationBusy}
@@ -364,9 +427,15 @@ function App() {
             explanation={aiExplanation} explanationBusy={explanationBusy}
           />}
           {page === 'Migration center' && <MigrationPage
-            migrations={migrations} inputs={migrationInputs} setInputs={setMigrationInputs}
+                migrations={migrations.filter((item) => item.workflow_type !== 'spot')} inputs={migrationInputs} setInputs={setMigrationInputs}
             create={createMigration} advance={advanceMigration} cancel={cancelMigration}
-            healthCheckPassed={healthCheckPassed} setHealthCheckPassed={setHealthCheckPassed}
+          />}
+          {page === 'Spot Migration Simulator' && <SpotMigrationSimulatorPage
+            migrations={migrations} pricing={pricing} create={startSpotSimulation}
+            advance={advanceMigration} loading={loading}
+          />}
+          {page === 'Cost Savings & Evaluation' && <CostEvaluationPage
+            pricing={pricing} analysis={reportAnalysis} run={runSavingsReport} busy={reportBusy}
           />}
           {page === 'Analytics & history' && <AnalyticsPage
             pricing={pricing} history={history} migrations={migrations} savedSavings={savedSavings}
@@ -489,6 +558,82 @@ function PricingPage({ pricing, status, busy, refresh, region, setRegion, azureR
   </>
 }
 
+function PriceArbitragePage({ pricing, status, loading, busy, refresh }) {
+  const spotCatalogQuotes = pricing.filter((item) => item.pricing_type === 'Spot' && item.hourly_price != null)
+  const eligibleQuotes = pricing.filter((item) => item.pricing_type === 'Spot'
+    && item.hourly_price != null
+    && item.currency
+    && item.pricing_model_status === 'verified'
+    && item.freshness === 'fresh'
+    && item.specifications_complete
+    && item.vcpu != null
+    && item.memory_gb != null)
+  const buckets = new Map()
+  eligibleQuotes.forEach((item) => {
+    const key = [item.vcpu, item.memory_gb, item.currency, item.pricing_type].join('|')
+    buckets.set(key, [...(buckets.get(key) || []), item])
+  })
+  const rows = eligibleQuotes.map((item) => {
+    const peers = buckets.get([item.vcpu, item.memory_gb, item.currency, item.pricing_type].join('|'))
+    const providersWithQuotes = new Set(peers.map((peer) => peer.provider))
+    const comparable = providersWithQuotes.size > 1
+    const cheapest = comparable ? peers.reduce((best, peer) => peer.hourly_price < best.hourly_price ? peer : best) : null
+    const difference = cheapest ? Math.max(0, item.hourly_price - cheapest.hourly_price) : null
+    return {
+      ...item,
+      comparable,
+      cheapest: cheapest === item,
+      difference,
+      savingsPercent: difference != null && item.hourly_price > 0 ? (difference / item.hourly_price) * 100 : null,
+    }
+  }).sort((left, right) => {
+    if (left.comparable !== right.comparable) return left.comparable ? -1 : 1
+    return left.hourly_price - right.hourly_price
+  })
+  const comparableGroups = [...buckets.values()].filter((group) => new Set(group.map((item) => item.provider)).size > 1).length
+  const providerStatuses = status.providers || {}
+
+  return <>
+    <PageHeader eyebrow="SPOT PRICE COMPARISON" title="Price Arbitrage Monitor" subtitle="Compare fresh, verified Spot hourly observations across providers. Cheapest is highlighted only for capacity- and currency-matched records." action={<button className="button primary" onClick={refresh} disabled={busy}>{busy ? 'Refreshing…' : '↻ Refresh pricing'}</button>} />
+    <div className="alert warning-alert"><b>AWS pricing not connected.</b><span>No AWS prices are requested or invented. GCP and Azure comparisons use existing catalog integrations only; matching capacity does not guarantee equivalent region, workload performance, or actual availability.</span></div>
+    {loading && <div className="panel loading-panel">Loading saved price observations…</div>}
+    {!loading && !eligibleQuotes.length && <div className="alert info-alert"><b>Catalog loaded, but no comparable Spot quotes qualify.</b><span>{spotCatalogQuotes.length} Spot records were returned; this monitor only includes complete hourly USD prices with verified pricing model and known vCPU/RAM. Open Cloud pricing to inspect source/unit fields. Refresh may reuse cached results or be delayed by provider rate limits.</span></div>}
+    <div className="provider-data-grid">
+      {migrationProviders.map((provider) => {
+        const count = eligibleQuotes.filter((item) => item.provider === provider).length
+        const pricedCount = spotCatalogQuotes.filter((item) => item.provider === provider).length
+        const providerStatus = providerStatuses[provider]
+        const label = provider === 'AWS' ? 'AWS PRICING NOT CONNECTED'
+          : providerStatus?.status === 'connected' || providerStatus?.status === 'partial' ? 'LIVE API DATA'
+            : providerStatus?.status === 'cached' || providerStatus?.cached ? 'CACHED DATA'
+              : 'UNAVAILABLE'
+        return <article className="panel provider-data-card" key={provider}>
+          <div className="provider-data-heading"><span className="provider-cell"><i style={{ background: colors[provider] }} />{provider}</span><span className={`data-label ${label.includes('UNAVAILABLE') || label.includes('NOT CONNECTED') ? 'data-unavailable' : ''}`}>{label}</span></div>
+          <p>{provider === 'AWS' ? 'AWS pricing not connected' : `${pricedCount} priced Spot catalog records · ${count} meet monitor requirements`}</p>
+          <small>{provider === 'AWS' ? 'Connect an approved pricing integration to compare AWS rates.' : `Last successful fetch: ${formatDate(providerStatus?.last_successful_fetch_at)}`}</small>
+        </article>
+      })}
+    </div>
+    <section className="panel table-panel">
+      <div className="panel-heading"><div><h2>Fresh eligible Spot observations</h2><p>{rows.length} observations · {comparableGroups} capacity-matched provider groups</p></div><span className="data-label">ESTIMATES · CATALOG DATA</span></div>
+      {rows.length ? <div className="table-wrap"><table>
+        <thead><tr><th>PROVIDER</th><th>INSTANCE / CAPACITY</th><th>REGION</th><th>CURRENCY</th><th>HOURLY PRICE</th><th>PRICE SOURCE</th><th>LAST UPDATED</th><th>COMPARISON</th></tr></thead>
+        <tbody>{rows.map((item, index) => <tr className={item.cheapest ? 'cheapest-row' : ''} key={item.snapshot_id || `${item.provider}-${item.sku_id}-${index}`}>
+          <td><span className="provider-cell"><i style={{ background: colors[item.provider] || '#8793a5' }} />{item.provider}</span></td>
+          <td><b>{item.instance_type || item.sku_id || 'Catalog item'}</b><small className="table-subline">{item.vcpu} vCPU · {item.memory_gb} GB · Spot</small></td>
+          <td>{item.region}</td><td>{item.currency}</td>
+          <td className="price-cell">{formatMoney(item.hourly_price, 5, item.currency)}<small className="table-subline">per instance-hour</small></td>
+          <td>{item.source}</td><td>{formatDate(item.fetched_at || item.observed_at)}</td>
+          <td>{item.cheapest ? <span className="cheapest-pill">Cheapest eligible</span> : item.comparable
+            ? <span>{formatMoney(item.difference, 5, item.currency)} higher<br /><small>{item.savingsPercent?.toFixed(2)}% estimated vs this quote</small></span>
+            : <span className="muted">No comparable peer</span>}</td>
+        </tr>)}</tbody>
+      </table></div> : <EmptyState title={loading ? 'Loading price observations' : 'No comparable Spot prices available'} text={loading ? 'Waiting for the pricing API response.' : 'Refresh GCP/Azure catalogs. Only fresh, verified hourly prices with complete CPU and memory specifications are eligible; no demo prices are inserted.'} />}
+      <p className="chart-footnote">Groups match vCPU, memory, currency, and Spot pricing model. Region names and service conditions are shown but are not normalized into geographic equivalence. AWS remains unavailable until connected.</p>
+    </section>
+  </>
+}
+
 function Filter({ label, value, onChange, values, emptyLabel }) {
   return <label className="filter-field"><span>{label}</span><select value={value} onChange={(event) => onChange(event.target.value)}>{values.map((item) => <option key={item || 'all'} value={item}>{item || emptyLabel || 'All'}</option>)}</select></label>
 }
@@ -560,6 +705,143 @@ function CostResult({ analysis, explain, explanation, explanationBusy }) {
   return <section className="panel result-panel"><div className="result-heading"><div><span className="eyebrow">ESTIMATED OUTCOME</span><h2>Cost breakdown</h2></div><StatusBadge value="estimate" /></div><div className="breakdown">{rows.map(([label, value]) => <div key={label}><span>{label}</span><b>{formatMoney(value, 2)}</b></div>)}<div className="breakdown-total"><span>Target total cost</span><b>{formatMoney(analysis.target_total_cost, 2)}</b></div></div><div className={`net-result ${analysis.net_savings < 0 ? 'loss' : ''}`}><span>Estimated net savings</span><strong>{formatMoney(analysis.net_savings, 2)}</strong><small>{Number(analysis.savings_percent).toFixed(2)}% · assumptions only</small></div><div className="break-even"><span>Break-even duration</span><b>{analysis.break_even_hours == null ? 'Not reached' : `${Number(analysis.break_even_hours).toFixed(2)} hours`}</b></div><p className="result-note">Optional AI explanation sends this estimate summary to Groq. It does not change the calculation.</p><button className="button secondary full" onClick={explain} disabled={explanationBusy}>{explanationBusy ? 'Generating explanation…' : 'Explain this estimate with AI'}</button>{explanation && <div className="ai-explanation"><b>AI explanation · Groq</b><p>{explanation}</p></div>}<p className="result-note">Estimate only; not an actual bill or guaranteed savings. Excluded categories may materially change the outcome.</p></section>
 }
 
+function CostEvaluationPage({ pricing, analysis, run, busy }) {
+  const staticOptions = pricing.filter((item) => item.pricing_type === 'OnDemand'
+    && item.hourly_price != null && item.currency === 'USD'
+    && item.pricing_model_status === 'verified' && item.freshness === 'fresh'
+    && item.specifications_complete)
+  const [baselineId, setBaselineId] = useState('')
+  const [migrationOverhead, setMigrationOverhead] = useState('10')
+  const [manualMode, setManualMode] = useState(false)
+  const [manualInputs, setManualInputs] = useState({
+    baselineProvider: 'GCP',
+    targetProvider: 'Azure',
+    baselineHourly: '0.12',
+    targetHourly: '0.08',
+  })
+  const baseline = staticOptions.find((item) => priceKey(item) === baselineId) || staticOptions[0]
+  const spotOptions = baseline ? pricing.filter((item) => item.provider !== baseline.provider
+    && item.pricing_type === 'Spot' && item.hourly_price != null
+    && item.currency === baseline.currency && item.pricing_model_status === 'verified'
+    && item.freshness === 'fresh' && item.specifications_complete
+    && item.vcpu === baseline.vcpu && item.memory_gb === baseline.memory_gb)
+    .sort((left, right) => left.hourly_price - right.hourly_price) : []
+  const target = spotOptions[0]
+  const useManualMode = manualMode || !baseline || !target
+  const maximumCost = analysis ? Math.max(analysis.current_cost, analysis.target_total_cost, 0.01) : 1
+  const manualAnalysis = analysis?.baseline_record.source?.startsWith('User-supplied')
+  const chartRows = analysis ? [
+    { title: `Static · ${analysis.current_provider}`, value: analysis.current_cost, tone: 'static' },
+    { title: `${manualAnalysis ? 'Assumed comparison' : 'Cheapest eligible Spot'} · ${analysis.target_provider}`, value: analysis.target_total_cost, tone: 'strategy' },
+  ] : []
+  const exportCsv = () => {
+    if (!analysis) return
+    const csvRows = [
+      ['Metric', 'Value', 'Unit'],
+      ['Report type', manualAnalysis ? 'User-assumed demo estimate; not live provider pricing' : 'Catalog-based estimate'],
+      ['Static provider', analysis.current_provider, ''],
+      ['Static instance', analysis.baseline_record.instance_type, ''],
+      ['Static region', analysis.baseline_record.region, ''],
+      ['Static price source', analysis.baseline_record.source, ''],
+      ['Static price timestamp', analysis.baseline_record.fetched_at || analysis.baseline_record.observed_at || 'Not applicable — user assumption', ''],
+      ['Static hourly cost', analysis.inputs.current_hourly_cost, 'USD/hour'],
+      ['Static monthly estimate', analysis.current_cost, 'USD/730 hours'],
+      ['Comparison provider', analysis.target_provider, ''],
+      ['Spot instance', analysis.target_record.instance_type, ''],
+      ['Spot region', analysis.target_record.region, ''],
+      ['Spot price source', analysis.target_record.source, ''],
+      ['Spot price timestamp', analysis.target_record.fetched_at || analysis.target_record.observed_at || 'Not applicable — user assumption', ''],
+      ['Spot hourly cost', analysis.inputs.target_hourly_cost, 'USD/hour'],
+      ['Migration overhead', analysis.migration_overhead, 'USD one-time'],
+      ['Strategy monthly estimate', analysis.target_total_cost, 'USD including one-time overhead'],
+      ['Estimated savings', analysis.net_savings, 'USD'],
+      ['Estimated savings percentage', analysis.savings_percent, '%'],
+      ['Break-even time', analysis.break_even_hours ?? 'Not reached', 'hours'],
+      ['Assumption', '730 hours per month; transfer and other costs set to zero', ''],
+      ['Data boundary', 'Catalog rates are estimates, not billing or performance benchmarks', ''],
+    ]
+    const content = csvRows.map((row) => row.map((cell) => `"${String(cell).replaceAll('"', '""')}"`).join(',')).join('\r\n')
+    const url = URL.createObjectURL(new Blob([content], { type: 'text/csv;charset=utf-8' }))
+    const link = document.createElement('a')
+    link.href = url
+    link.download = 'cloudoptima-cost-savings-evaluation.csv'
+    link.click()
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+  }
+
+  return <>
+    <PageHeader eyebrow="COST MODEL · ESTIMATES" title="Cost Savings & Evaluation" subtitle="Use eligible catalog rates when available, or clearly labelled user assumptions when the catalogs cannot provide a comparable pair. Calculation uses the existing FastAPI cost service." action={<button className="button secondary" onClick={exportCsv} disabled={!analysis}>↓ Export displayed report to CSV</button>} />
+    <div className="alert info-alert"><b>Estimate assumptions.</b><span>Monthly duration is fixed at 730 hours. Spot pricing may be interrupted; catalog prices are not guarantees or benchmark results. Taxes, transfer and other costs are excluded unless entered below.</span></div>
+    <div className="evaluation-layout">
+      <form className="panel form-panel" onSubmit={(event) => {
+        event.preventDefault()
+        if (useManualMode) {
+          const manualRecord = (provider, hourlyPrice, pricingType) => ({
+            provider,
+            hourly_price: Number(hourlyPrice),
+            currency: 'USD',
+            pricing_type: pricingType,
+            instance_type: 'User-assumed equivalent workload',
+            region: 'User assumption',
+            source: 'User-supplied demonstration assumption — not live data',
+            observed_at: null,
+            fetched_at: null,
+            snapshot_id: null,
+          })
+          run(
+            manualRecord(manualInputs.baselineProvider, manualInputs.baselineHourly, 'OnDemand'),
+            manualRecord(manualInputs.targetProvider, manualInputs.targetHourly, 'Spot strategy assumption'),
+            migrationOverhead,
+          )
+        } else if (baseline && target) {
+          run(baseline, target, migrationOverhead)
+        }
+      }}>
+        <div className="panel-heading"><div><h2>Evaluation inputs</h2><p>Choose eligible catalog records when available, or enter explicitly labelled assumptions.</p></div></div>
+        {useManualMode ? <div className="manual-estimate-box">
+          <div className="alert warning-alert"><b>Manual estimate mode — not live pricing.</b><span>These are user-entered demo assumptions, not provider-observed rates or an engine-selected cheapest provider.</span></div>
+          <div className="form-grid">
+            <Field label="Static baseline provider"><select value={manualInputs.baselineProvider} onChange={(event) => setManualInputs((current) => ({ ...current, baselineProvider: event.target.value, targetProvider: current.targetProvider === event.target.value ? migrationProviders.find((provider) => provider !== event.target.value) : current.targetProvider }))}>{migrationProviders.map((provider) => <option key={provider}>{provider}</option>)}</select></Field>
+            <Field label="Comparison provider (assumption)"><select value={manualInputs.targetProvider} onChange={(event) => setManualInputs((current) => ({ ...current, targetProvider: event.target.value }))}>{migrationProviders.filter((provider) => provider !== manualInputs.baselineProvider).map((provider) => <option key={provider}>{provider}</option>)}</select></Field>
+            <Field label="Assumed static hourly cost (USD)" prefix="$"><input type="number" min="0" step="any" value={manualInputs.baselineHourly} onChange={(event) => setManualInputs((current) => ({ ...current, baselineHourly: event.target.value }))} required /></Field>
+            <Field label="Assumed comparison hourly cost (USD)" prefix="$"><input type="number" min="0" step="any" value={manualInputs.targetHourly} onChange={(event) => setManualInputs((current) => ({ ...current, targetHourly: event.target.value }))} required /></Field>
+          </div>
+          <p className="result-note">Demo example: $0.12/hour static vs $0.08/hour comparison, 730 hours/month, plus $10 one-time overhead. These defaults are illustrative only; replace them with your documented estimates.</p>
+          {baseline && target && <button className="text-button" type="button" onClick={() => setManualMode(false)}>Use eligible catalog comparison instead</button>}
+        </div> : <>
+          <label className="field"><span>Static allocation · On-Demand baseline</span><select value={priceKey(baseline)} onChange={(event) => setBaselineId(event.target.value)}>{staticOptions.map((item, index) => <option key={`${priceKey(item)}-${index}`} value={priceKey(item)}>{item.provider} · {item.instance_type} · {item.vcpu} vCPU / {item.memory_gb} GB · {formatMoney(item.hourly_price, 5)}</option>)}</select></label>
+          <div className="report-selection"><b>Static allocation</b><span>{baseline.provider} · {baseline.region} · {formatMoney(baseline.hourly_price, 5)}/hour</span><small>Source: {baseline.source} · {formatDate(baseline.fetched_at || baseline.observed_at)}</small></div>
+          <div className="report-selection selected-target"><b>Cheapest eligible Spot strategy</b><span>{target.provider} · {target.region} · {formatMoney(target.hourly_price, 5)}/hour</span><small>{target.instance_type} · capacity matched at {target.vcpu} vCPU / {target.memory_gb} GB · {target.currency}</small></div>
+        </>}
+        <div className="report-input-row">
+          <label className="field"><span>Migration overhead estimate (one-time USD)</span><input type="number" min="0" step="any" value={migrationOverhead} onChange={(event) => setMigrationOverhead(event.target.value)} /></label>
+          <label className="field"><span>Comparison duration</span><input value="730 hours (monthly estimate)" readOnly /></label>
+        </div>
+        <button className="button primary" type="submit" disabled={(!useManualMode && (!baseline || !target)) || busy}>{busy ? 'Calculating…' : 'Calculate & save evaluation →'}</button>
+        {!staticOptions.length && <p className="result-note">No eligible live catalog baseline is available. AWS pricing is not connected; manual mode is only for clearly labelled estimates.</p>}
+      </form>
+      <section className="panel evaluation-result">
+        {busy && <div className="loading-panel">Calculating through the existing cost service…</div>}
+        {!busy && !analysis && <EmptyState title="No evaluation report yet" text="Choose an eligible baseline and Spot alternative, then calculate to see estimates and a comparison chart." />}
+        {analysis && <>
+          <div className="panel-heading"><div><span className="eyebrow">{manualAnalysis ? 'USER-ASSUMED ESTIMATE · NOT LIVE DATA' : 'SAVED ESTIMATE · NOT A BENCHMARK'}</span><h2>Monthly cost comparison</h2></div><StatusBadge value="estimate" /></div>
+          <div className="evaluation-chart" role="img" aria-label="Bar chart comparing estimated monthly costs">
+            {chartRows.map((item) => <div className="evaluation-bar-row" key={item.title}><div><span>{item.title}</span><b>{formatMoney(item.value, 2)}</b></div><div className="evaluation-track"><span className={`evaluation-bar ${item.tone}`} style={{ width: `${Math.max(1, item.value / maximumCost * 100)}%` }} /></div></div>)}
+            <small>USD · 730 hours · migration overhead included in Spot strategy</small>
+          </div>
+          <div className="evaluation-metrics">
+            <div><span>Estimated hourly cost</span><b>{formatMoney(analysis.inputs.current_hourly_cost, 5)} → {formatMoney(analysis.inputs.target_hourly_cost, 5)}</b></div>
+            <div><span>Migration overhead</span><b>{formatMoney(analysis.migration_overhead, 2)}</b></div>
+            <div><span>Estimated savings</span><b className={analysis.net_savings < 0 ? 'negative-value' : 'positive-value'}>{formatMoney(analysis.net_savings, 2)} · {Number(analysis.savings_percent).toFixed(2)}%</b></div>
+            <div><span>Break-even time</span><b>{analysis.break_even_hours == null ? 'Not reached' : `${Number(analysis.break_even_hours).toFixed(2)} hours`}</b></div>
+          </div>
+          <p className="result-note">Calculated by the existing FastAPI cost service. It uses {manualAnalysis ? 'user-entered hourly assumptions' : 'catalog hourly prices'}, 730 hours, entered migration overhead, and zero transfer/other costs. Spot interruption, actual utilization, discounts, taxes, data transfer and non-compute costs are not modeled.</p>
+        </>}
+      </section>
+    </div>
+  </>
+}
+
 function DecisionPage({ inputs, setInputs, run, result, pricing, prepareMigration, explain, explanation, explanationBusy }) {
   const update = (key) => (event) => setInputs((current) => ({ ...current, [key]: event.target.type === 'checkbox' ? event.target.checked : event.target.value }))
   return <>
@@ -592,7 +874,7 @@ function DecisionResult({ result, pricingCount, prepareMigration, currentProvide
   return <section className="panel decision-result"><span className="eyebrow">DETERMINISTIC RESULT</span><div className="decision-provider"><span className="provider-logo">{result.recommended_provider}</span><div><small>RECOMMENDATION</small><h2>{result.recommended_provider}</h2></div><StatusBadge value={result.mode || 'unavailable'} /></div><p>{result.reason}</p><div className="decision-summary"><span>Estimated net savings</span><b>{result.estimated_net_savings == null ? 'Unavailable' : formatMoney(result.estimated_net_savings, 2)}</b></div><h3>Evaluated candidates ({result.candidates?.length || 0})</h3>{result.candidates?.length ? result.candidates.map((item, index) => <div className="candidate-row" key={`${item.provider}-${item.sku_id}-${index}`}><span><i style={{ background: colors[item.provider] }} />{item.provider} · {item.instance_type}</span><b>{formatMoney(item.hourly_price, 5)}</b><small>{item.reason}</small></div>) : <EmptyState title="No eligible candidate" text="No current record has all verified hourly price, USD currency, region, pricing model, freshness, and capacity data required for this workload." />}<h3>Excluded observations ({result.rejected_candidates?.length || 0})</h3>{result.rejected_candidates?.slice(0, 8).map((item, index) => <div className="candidate-row rejected-row" key={`${item.provider}-${index}`}><span>{item.provider}</span><small>{item.reason}</small></div>)}<p className="result-note">Optional AI explanation sends this decision summary to Groq. It does not affect the numerical result.</p><button className="button secondary full" onClick={explain} disabled={explanationBusy}>{explanationBusy ? 'Generating explanation…' : 'Explain decision with AI'}</button>{explanation && <div className="ai-explanation"><b>AI explanation · Groq</b><p>{explanation}</p></div>}<button className="button secondary full" disabled={!result.candidates?.some((item) => item.eligible)} onClick={() => prepareMigration(currentProvider, result.recommended_provider)}>Prepare migration simulation</button><p className="result-note">The rules engine—not AI—makes the recommendation. It never provisions resources. Retail rates are not actual bills or negotiated prices.</p></section>
 }
 
-function MigrationPage({ migrations, inputs, setInputs, create, advance, cancel, healthCheckPassed, setHealthCheckPassed }) {
+function MigrationPage({ migrations, inputs, setInputs, create, advance, cancel }) {
   const update = (key) => (event) => setInputs((current) => ({ ...current, [key]: event.target.value }))
   return <>
     <PageHeader eyebrow="SAFE WORKFLOW" title="Migration center" subtitle="Exercise the workflow state machine only. No real workloads, networks, or DNS records are changed." />
@@ -603,14 +885,122 @@ function MigrationPage({ migrations, inputs, setInputs, create, advance, cancel,
       <Field label="Workload label"><input value={inputs.workload_name} onChange={update('workload_name')} maxLength="120" placeholder="e.g. analytics-worker" required /></Field>
       <label className="checkbox-field"><input type="checkbox" checked readOnly />Simulation mode enforced</label>
     </div><button className="button primary" type="submit">Create migration simulation →</button></form>
-    <div className="migration-list">{migrations.length ? migrations.map((migration) => <MigrationCard key={migration.migration_id} migration={migration} advance={advance} cancel={cancel} healthCheckPassed={healthCheckPassed} setHealthCheckPassed={setHealthCheckPassed} />) : <section className="panel"><EmptyState title="No migration simulations" text="Create a simulation above to view the guarded step-by-step progression." /></section>}</div>
+    <div className="migration-list">{migrations.length ? migrations.map((migration) => <MigrationCard key={migration.migration_id} migration={migration} advance={advance} cancel={cancel} />) : <section className="panel"><EmptyState title="No migration simulations" text="Create a simulation above to view the guarded step-by-step progression." /></section>}</div>
   </>
 }
 
-function MigrationCard({ migration, advance, cancel, healthCheckPassed, setHealthCheckPassed }) {
-  const states = ['PENDING', 'PROVISIONING', 'DEPLOYING', 'HEALTH_CHECK', 'READY_TO_SWITCH', 'SWITCHING_TRAFFIC', 'VERIFYING', 'COMPLETED']
-  const currentIndex = states.indexOf(migration.state)
-  return <section className="panel migration-card"><div className="migration-card-head"><div><span className="eyebrow">{migration.workload_name}</span><h2>{migration.source_provider} <span>→</span> {migration.target_provider}</h2></div><StatusBadge value={migration.state} /></div><div className="migration-meta"><span>Created <b>{formatDate(migration.created_at)}</b></span><span className="sim-label">SIMULATION · NO RESOURCE CHANGES</span></div><div className="timeline">{states.map((state, index) => <div key={state} className={`timeline-step ${index <= currentIndex ? 'done' : ''} ${migration.state === 'FAILED' && index === currentIndex ? 'error' : ''}`}><span className="timeline-marker">{index < currentIndex ? '✓' : index + 1}</span><b>{state.replaceAll('_', ' ')}</b></div>)}</div>{migration.history?.length > 0 && <div className="history-message">{migration.history[migration.history.length - 1].message}</div>}<div className="migration-controls">{migration.state === 'HEALTH_CHECK' ? <label className="checkbox-field"><input type="checkbox" checked={healthCheckPassed} onChange={(event) => setHealthCheckPassed(event.target.checked)} />Health check passes</label> : <span className="muted">{migration.source_workload_active === false ? 'Source deactivated in simulation state only' : 'Source remains active'}</span>}<div>{!terminalStates.includes(migration.state) && <><button className="button secondary compact" onClick={() => cancel(migration)}>Cancel</button><button className="button primary compact" onClick={() => advance(migration)}>Advance simulation</button></>}</div></div></section>
+function MigrationCard({ migration, advance, cancel }) {
+  const [backupConfirmed, setBackupConfirmed] = useState(false)
+  const [approvalConfirmed, setApprovalConfirmed] = useState(false)
+  const [targetHealthPassed, setTargetHealthPassed] = useState(true)
+  const [postSwitchHealthPassed, setPostSwitchHealthPassed] = useState(true)
+  const history = migration.history || []
+  const safetyChecks = migration.safety_checks || []
+  const needsBackupConfirmation = migration.state === 'PENDING'
+  const needsApproval = migration.state === 'READY_TO_SWITCH'
+  const needsHealthCheck = migration.state === 'HEALTH_CHECK'
+  const needsPostSwitchCheck = migration.state === 'VERIFYING'
+  const canAdvance = (!needsBackupConfirmation || backupConfirmed)
+    && (!needsApproval || approvalConfirmed)
+  const advanceWithChecks = () => advance(migration, {
+    backup_confirmed: needsBackupConfirmation && backupConfirmed,
+    approval_confirmed: needsApproval && approvalConfirmed,
+    health_check_passed: needsHealthCheck ? targetHealthPassed : needsPostSwitchCheck ? postSwitchHealthPassed : true,
+  })
+  return <section className="panel migration-card"><div className="migration-card-head"><div><span className="eyebrow">{migration.workload_name}</span><h2>{migration.source_provider} <span>→</span> {migration.target_provider}</h2></div><StatusBadge value={migration.state} /></div><div className="migration-meta"><span>Created <b>{formatDate(migration.created_at)}</b></span><span className="sim-label">SIMULATION · NO RESOURCE CHANGES</span></div><div className="safety-timeline"><h3>SIMULATED safety timeline</h3>{history.map((event, index) => <div className="safety-event" key={`${event.state}-${event.at}-${index}`}><span className="timeline-marker">{index + 1}</span><div><b>{event.state.replaceAll('_', ' ')}</b><time>{formatDate(event.at)}</time><p>{event.message}</p></div></div>)}</div>{safetyChecks.length > 0 && <div className="safety-checks"><h3>SIMULATED safety checks</h3>{safetyChecks.map((check, index) => <div className="safety-check-row" key={`${check.check}-${check.at}-${index}`}><b>{check.check.replaceAll('_', ' ')}</b><StatusBadge value={check.status} /><time>{formatDate(check.at)}</time><p>{check.message}</p></div>)}</div>}<div className="history-message">SIMULATED · {migration.source_workload_active === false ? 'Workflow completed; source state changed only in simulation.' : 'Source environment remains active and is the intended recovery target.'}</div><div className="migration-controls"><div className="safety-gates">{needsBackupConfirmation && <label className="checkbox-field"><input type="checkbox" checked={backupConfirmed} onChange={(event) => setBackupConfirmed(event.target.checked)} />SIMULATED: backup confirmed (no backup created)</label>}{needsHealthCheck && <label className="checkbox-field"><input type="checkbox" checked={targetHealthPassed} onChange={(event) => setTargetHealthPassed(event.target.checked)} />SIMULATED: target health check passes</label>}{needsApproval && <label className="checkbox-field"><input type="checkbox" checked={approvalConfirmed} onChange={(event) => setApprovalConfirmed(event.target.checked)} />SIMULATED: approve traffic-switch stage</label>}{needsPostSwitchCheck && <label className="checkbox-field"><input type="checkbox" checked={postSwitchHealthPassed} onChange={(event) => setPostSwitchHealthPassed(event.target.checked)} />SIMULATED: post-switch health check passes</label>}</div><div>{!terminalStates.includes(migration.state) && <><button className="button secondary compact" onClick={() => cancel(migration)}>Cancel</button><button className="button primary compact" disabled={!canAdvance} onClick={advanceWithChecks}>{migration.state === 'ROLLING_BACK' ? 'Complete rollback simulation' : needsPostSwitchCheck ? 'Run simulated verification' : 'Advance simulation'}</button></>}</div></div></section>
+}
+
+const spotStages = [
+  'PRICE_ALERT',
+  'TARGET_SELECTION',
+  'BACKUP_CONFIRMATION',
+  'HEALTH_CHECK',
+  'APPROVAL_GATE',
+  'SIMULATED_TRAFFIC_SWITCH',
+  'VERIFICATION',
+  'COMPLETED',
+]
+
+function SpotMigrationSimulatorPage({ migrations, pricing, create, advance, loading }) {
+  const spotMigrations = migrations.filter((item) => item.workflow_type === 'spot')
+    .sort((left, right) => new Date(right.created_at) - new Date(left.created_at))
+  const [activeId, setActiveId] = useState('')
+  const [sourceProvider, setSourceProvider] = useState('GCP')
+  const [targetProvider, setTargetProvider] = useState('Azure')
+  const [backupConfirmed, setBackupConfirmed] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const activeMigration = spotMigrations.find((item) => item.migration_id === activeId) || spotMigrations[0]
+  const spotQuotes = pricing.filter((item) => item.pricing_type === 'Spot' && item.hourly_price != null
+    && item.currency === 'USD' && item.pricing_model_status === 'verified' && item.freshness === 'fresh')
+
+  const start = async () => {
+    setBusy(true)
+    setBackupConfirmed(false)
+    const result = await create(sourceProvider, targetProvider)
+    if (result) setActiveId(result.migration_id)
+    setBusy(false)
+  }
+  const progressState = activeMigration?.state
+  const currentStage = progressState === 'HEALTH_CHECK_FAILED' ? 'HEALTH_CHECK'
+    : progressState === 'VERIFICATION_FAILED' ? 'VERIFICATION'
+      : progressState
+  const progressStages = progressState === 'ROLLING_BACK' || progressState === 'ROLLED_BACK'
+    ? [...spotStages.slice(0, -1), 'ROLLING_BACK', 'ROLLED_BACK']
+    : spotStages
+  const currentIndex = progressStages.indexOf(currentStage)
+  const runAdvance = async (safety = {}) => {
+    setBusy(true)
+    await advance(activeMigration, safety)
+    setBusy(false)
+  }
+  const showAdvance = (label, safety, disabled = false) => <button className="button primary" onClick={() => runAdvance(safety)} disabled={busy || disabled}>{busy ? 'Updating…' : label}</button>
+
+  return <>
+    <PageHeader eyebrow="BACKEND-GUARDED WORKFLOW" title="Spot Migration Simulator" subtitle="Demonstrate price-alert handling and gated Spot migration decisions. Every stage and operation is simulated." />
+    <div className="simulation-banner"><b>SIMULATION ONLY — NO REAL CLOUD RESOURCES ARE MOVED</b><span>No VMs are provisioned, real data is copied, production traffic is switched, or DNS records changed.</span></div>
+    <div className="spot-simulator-layout">
+      {!activeMigration && <section className="panel spot-start-panel">
+        <div className="panel-heading"><div><h2>Start a simulated price-alert scenario</h2><p>{loading ? 'Checking saved runs…' : `${spotQuotes.length} fresh verified Spot price observations available; alert trigger below is always labelled simulated.`}</p></div></div>
+        <div className="form-grid">
+          <Field label="Source provider"><select value={sourceProvider} onChange={(event) => { const next = event.target.value; setSourceProvider(next); if (next === targetProvider) setTargetProvider(migrationProviders.find((provider) => provider !== next)) }}>{migrationProviders.map((provider) => <option key={provider}>{provider}</option>)}</select></Field>
+          <Field label="Target provider"><select value={targetProvider} onChange={(event) => setTargetProvider(event.target.value)}>{migrationProviders.filter((provider) => provider !== sourceProvider).map((provider) => <option key={provider}>{provider}</option>)}</select></Field>
+        </div>
+        <p className="result-note">{spotQuotes.length ? 'Catalog observations are evidence only; starting the scenario does not mean a real price alert fired.' : 'No eligible catalog Spot price is available. You can still walk through the workflow as a clearly labelled simulation without inventing a price.'}</p>
+        <button className="button primary" onClick={start} disabled={busy || loading || sourceProvider === targetProvider}>{busy ? 'Starting…' : 'Start simulated workflow →'}</button>
+        {!loading && spotMigrations.length === 0 && <p className="empty-inline">No Spot simulation has been created yet.</p>}
+      </section>}
+      {activeMigration && <>
+        <section className="panel spot-current-panel">
+          <div className="spot-run-header"><div><span className="eyebrow">CURRENT SIMULATION</span><h2>{activeMigration.source_provider} <span>→</span> {activeMigration.target_provider}</h2><small>Run created {formatDate(activeMigration.created_at)}</small></div><div className="spot-run-actions"><StatusBadge value={activeMigration.state} /><button className="button secondary compact" onClick={start} disabled={busy}>{busy ? 'Starting…' : 'Reset scenario'}</button></div></div>
+          <div className="spot-progress" aria-label="Simulation progress">
+            {progressStages.map((stage, index) => <div key={stage} className={`spot-progress-step ${index < currentIndex ? 'done' : ''} ${index === currentIndex ? 'current' : ''}`}>
+              <span>{index < currentIndex ? '✓' : index + 1}</span><b>{stage.replaceAll('_', ' ')}</b>
+            </div>)}
+          </div>
+          <div className="spot-stage-summary"><span>Current state</span><b>{activeMigration.state.replaceAll('_', ' ')}</b><span>Migration result</span><b>{activeMigration.state === 'COMPLETED' ? 'Simulated verification passed' : activeMigration.state === 'ROLLED_BACK' ? 'Simulated rollback to source' : activeMigration.error || 'In progress · no production changes'}</b></div>
+          <div className="spot-control">
+            {activeMigration.state === 'PRICE_ALERT' && showAdvance('Acknowledge simulated price alert', {})}
+            {activeMigration.state === 'TARGET_SELECTION' && showAdvance('Confirm selected target', {})}
+            {activeMigration.state === 'BACKUP_CONFIRMATION' && <><label className="checkbox-field"><input type="checkbox" checked={backupConfirmed} onChange={(event) => setBackupConfirmed(event.target.checked)} />SIMULATED backup confirmed (no real backup created)</label>{showAdvance('Confirm backup & continue', { backup_confirmed: backupConfirmed }, !backupConfirmed)}</>}
+            {activeMigration.state === 'HEALTH_CHECK' && <><span>SIMULATED target health check:</span><button className="button secondary" onClick={() => runAdvance({ health_check_passed: true })} disabled={busy}>Pass health check</button><button className="button secondary" onClick={() => runAdvance({ health_check_passed: false })} disabled={busy}>Fail health check</button></>}
+            {activeMigration.state === 'HEALTH_CHECK_FAILED' && <><span>Health check failed; choose a recovery action.</span>{showAdvance('Simulate rollback to source', { rollback_confirmed: true })}</>}
+            {activeMigration.state === 'APPROVAL_GATE' && showAdvance('Approve simulated switch', { approval_confirmed: true })}
+            {activeMigration.state === 'SIMULATED_TRAFFIC_SWITCH' && showAdvance('Run simulated traffic switch', {})}
+            {activeMigration.state === 'VERIFICATION' && <><span>SIMULATED post-switch verification:</span><button className="button secondary" onClick={() => runAdvance({ health_check_passed: true })} disabled={busy}>Pass verification</button><button className="button secondary" onClick={() => runAdvance({ health_check_passed: false })} disabled={busy}>Fail verification</button></>}
+            {activeMigration.state === 'VERIFICATION_FAILED' && <><span>Verification failed; choose a recovery action.</span>{showAdvance('Simulate rollback to source', { rollback_confirmed: true })}</>}
+            {activeMigration.state === 'ROLLING_BACK' && showAdvance('Complete simulated rollback', {})}
+            {terminalStates.includes(activeMigration.state) && <span className="spot-terminal-note">This run is complete. Reset starts a new run and preserves this history.</span>}
+          </div>
+          <div className="history-message">SIMULATED · {activeMigration.source_workload_active ? 'Source remains active and is the intended recovery target.' : 'Workflow completed in the simulation only.'}</div>
+        </section>
+        <section className="panel spot-timeline-panel"><div className="panel-heading"><div><h2>Event timeline</h2><p>Backend-persisted simulated transitions and recorded safety checks.</p></div></div>
+          <div className="safety-timeline">{(activeMigration.history || []).map((event, index) => <div className="safety-event" key={`${event.state}-${event.at}-${index}`}><span className="timeline-marker">{index + 1}</span><div><b>{event.state.replaceAll('_', ' ')}</b><time>{formatDate(event.at)}</time><p>{event.message}</p></div></div>)}</div>
+          {(activeMigration.safety_checks || []).length > 0 && <div className="safety-checks"><h3>SIMULATED CHECKS</h3>{activeMigration.safety_checks.map((check, index) => <div className="safety-check-row" key={`${check.check}-${check.at}-${index}`}><b>{check.check.replaceAll('_', ' ')}</b><StatusBadge value={check.status} /><time>{formatDate(check.at)}</time><p>{check.message}</p></div>)}</div>}
+        </section>
+      </>}
+      {spotMigrations.length > 1 && <section className="panel spot-runs-panel"><div className="panel-heading"><div><h2>Previous simulation runs</h2><p>Select a saved run to inspect its timeline.</p></div></div>{spotMigrations.slice(0, 10).map((item) => <button className={`spot-run-row ${activeMigration?.migration_id === item.migration_id ? 'selected' : ''}`} key={item.migration_id} onClick={() => { setActiveId(item.migration_id); setBackupConfirmed(false) }}><span>{item.source_provider} → {item.target_provider}<small>{formatDate(item.created_at)}</small></span><StatusBadge value={item.state} /></button>)}</section>}
+    </div>
+  </>
 }
 
 function AnalyticsPage({ pricing, history, migrations, savedSavings }) {

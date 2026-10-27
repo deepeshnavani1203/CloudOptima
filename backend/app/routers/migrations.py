@@ -23,7 +23,12 @@ async def create_migration(request: MigrationCreate):
         raise HTTPException(status_code=403, detail="Real cloud migrations are disabled; only explicit demo simulations are supported.")
     if request.source_provider == request.target_provider:
         raise HTTPException(status_code=422, detail="Source and target providers must differ.")
-    migration = new_migration(request.source_provider, request.target_provider, request.workload_name)
+    migration = new_migration(
+        request.source_provider,
+        request.target_provider,
+        request.workload_name,
+        workflow_type=request.workflow_type,
+    )
     await store.insert("migrations", migration["migration_id"], migration)
     await store.insert("audit_logs", f"migration:{migration['migration_id']}:created", {
         "resource_id": migration["migration_id"],
@@ -53,7 +58,13 @@ async def advance(migration_id: str, request: MigrationAdvance):
     migration = await store.get("migrations", migration_id)
     if not migration:
         raise HTTPException(status_code=404, detail="Migration not found.")
-    updated = advance_migration(migration, request.health_check_passed)
+    updated = advance_migration(
+        migration,
+        request.health_check_passed,
+        backup_confirmed=request.backup_confirmed,
+        approval_confirmed=request.approval_confirmed,
+        rollback_confirmed=request.rollback_confirmed,
+    )
     await store.replace("migrations", migration_id, updated)
     await store.insert("audit_logs", f"migration:{migration_id}:{updated['updated_at'].isoformat()}", {
         "resource_id": migration_id,

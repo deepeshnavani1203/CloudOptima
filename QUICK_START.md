@@ -147,17 +147,51 @@ Current public catalog records mein GCP ke component prices aur provider machine
 1. Source `GCP`, target `Azure` select karo.
 2. Workload name `sir-demo-app` likho.
 3. **Create migration simulation** dabao.
-4. **Advance simulation** ko har step par dabao aur timeline/state dekho.
-5. `HEALTH_CHECK` par **Health check passes** enabled rakho aur advance karo.
-6. Optional: second run mein health check off karke failure gate dikhao, ya active simulation cancel karo.
+4. **SIMULATED: backup confirmed** checkbox tick karo; phir **Advance simulation** dabao. Real backup create nahi hota.
+5. `HEALTH_CHECK` par simulated target health check pass rehne do aur advance karo.
+6. `READY_TO_SWITCH` par **SIMULATED: approve traffic-switch stage** explicitly tick karo. Approval ke bina backend transition reject karega.
+7. `VERIFYING` par post-switch simulated health check fail karke **Run simulated verification** dabao. State `ROLLING_BACK` hogi; next button se rollback simulation complete karke `ROLLED_BACK` dekho. Source recovery target active rehta hai.
+8. Successful path dikhana ho toh new simulation mein backup confirm karo, pre-switch health check pass, switch approval tick, aur post-switch verification pass rakho.
+9. Safety timeline mein har state, timestamp, simulated backup/approval/health-check result aur failure/rollback reason dikhhao. Active simulation cancel bhi kar sakte ho.
 
 **Sir ko kya bolo**
 
-> “Ye migration orchestration ka UI/state-machine demonstration hai. Ye provisioning, application deploy, image copy, traffic move ya real DNS update nahi karta. Health-check gate fail ho toh simulation fail hoti hai aur source workload active rehta hai.”
+> “Migration center safety gates wala simulation hai. Backup confirmation, target health check, traffic-switch approval aur post-switch verification backend par validate hote hain. Post-switch health fail ho toh rollback state source ko recovery target dikhati hai. Koi real backup, deployment, data copy, traffic switch ya DNS update nahi hota.”
 
-**Safety line:** Timeline mein `SWITCHING_TRAFFIC`/`COMPLETED` labels simulation ke states hain; real traffic ya cloud resources change nahi hote.
+**Safety line:** Har checkbox aur timeline stage `SIMULATED` hai. `ROLLING_BACK`, `ROLLED_BACK` ya `COMPLETED` status bhi real cloud action ka proof nahi.
 
-### 6. Analytics & history — jo actions hue wahi dikhana
+### 6. Price Arbitrage Monitor — comparable Spot rates
+
+1. **Price Arbitrage Monitor** kholo aur **Refresh pricing** dabao; ye existing GCP/Azure catalog APIs reuse karta hai.
+2. AWS card par **AWS pricing not connected** dikhega. AWS ka fabricated ya demo price is page mein nahi hai.
+3. Fresh, verified hourly Spot rates hi comparison table mein aate hain. Cheapest provider tabhi highlight hota hai jab CPU, memory, currency aur pricing model comparable hon.
+4. Agar **“no comparable Spot quotes qualify”** aaye, iska matlab refresh fail hua ho zaroori nahi. Catalog records aa sakte hain, lekin full instance-hour rate ya vCPU/RAM specs missing hone se monitor unhe compare nahi karta. Cloud pricing explorer mein source/unit check karo; component rate ko full VM price mat samjho.
+5. Provider card par catalog-record count aur eligible count alag dekho. `LIVE API DATA` direct successful fetch, `CACHED DATA` cache reuse aur `UNAVAILABLE` qualifying data na hone ko batata hai. AWS connected nahi hai.
+
+**Sir ko kya bolo:** “Monitor catalog evidence dikhata hai, actual Spot capacity ya guaranteed savings nahi. Region equivalence normalize nahi hai; matching capacity sirf rough comparison basis hai. AWS integration abhi connected nahi hai.”
+
+### 7. Spot Migration Simulator — backend state machine
+
+1. **Spot Migration Simulator** kholo, source aur target select karo, phir **Start simulated workflow** dabao.
+2. Price-alert acknowledgement aur target-selection stages complete karo.
+3. Backup confirmation check karo; health check ko pass ya fail karke dono branches dikhai ja sakti hain.
+4. Passing health check ke baad simulated switch approve karke traffic-switch stage aur verification chalao.
+5. Verification (ya target health check) fail ho toh **Simulate rollback to source** dabao, phir rollback completion. **Reset scenario** ek naya run banata hai; saved purana timeline rehta hai.
+
+**Sir ko kya bolo:** “Har stage existing FastAPI migration endpoints se backend par validate hoti hai. Ye simulation hai—VM, data, real traffic ya DNS move nahi hota.”
+
+### 8. Cost Savings & Evaluation — estimate report and CSV
+
+1. **Cost Savings & Evaluation** kholo.
+2. Eligible live data ho toh static baseline select karo; app matching vCPU/memory wali doosri provider ki cheapest eligible Spot rate choose karti hai.
+3. Agar live records eligible nahi, form **Manual estimate mode — not live pricing** dikhayega. Demo ke liye baseline `GCP`, comparison `Azure`, static hourly `0.12`, comparison hourly `0.08`, migration overhead `10` use karo. Ye sirf example assumptions hain, provider rates nahi.
+4. **Calculate & save evaluation** dabao. Example mein 730-hour month par static ~$87.60, comparison plus overhead ~$68.40, estimated savings ~$19.20 (21.92%), break-even 250 hours. Overhead `0` karoge toh monthly savings $29.20 aur break-even 0 hours.
+5. Static vs comparison strategy ki estimated hourly/monthly cost, overhead, savings, percentage aur break-even time dekho.
+6. **Export displayed report to CSV** se wahi current displayed calculation download karo.
+
+**Assumptions:** Manual mode ke hourly values user assumptions hain—na live data na cheapest-provider recommendation. Month = 730 hours; transfer aur other costs = $0; entered migration overhead once add hota hai. Spot interruption risk, taxes, discounts aur non-compute services model nahi hain. Live catalog mode eligible records na milne par prices invent nahi karta.
+
+### 9. Analytics & history — jo actions hue wahi dikhana
 
 Calculator save karne, decision evaluate karne, aur migration simulation banane ke baad ye page kholo.
 
@@ -172,7 +206,7 @@ Calculator save karne, decision evaluate karne, aur migration simulation banane 
 
 > “Analytics generated sample chart nahi hai; ye workspace mein actually saved estimates, decisions, snapshots aur simulations se banta hai. MongoDB connected ho toh history durable store mein rehti hai. Memory mode mein backend restart par data reset ho sakta hai.”
 
-### 7. Settings — integration aur limitations
+### 10. Settings — integration aur limitations
 
 Provider status aur last successful fetch dikhhao. Saath mein database/persistence mode, Groq configured status, cloud provisioning disabled, aur DNS mock status explain karo.
 
@@ -193,3 +227,19 @@ Provider status aur last successful fetch dikhhao. Saath mein database/persisten
 - Azure rate limiting ko bypass nahi kiya gaya; retry wait aur bounded/partial results transparency se handle hote hain.
 - Backend memory mode mein history restart ke baad persist nahi hoti.
 - AWS, real provisioning, registry/image copy, production DNS failover, aur live migration current implemented scope mein nahi hain.
+
+## Local development servers (Windows PowerShell)
+
+Backend aur frontend ko alag PowerShell terminals mein chalao. Vite API proxy `http://127.0.0.1:5000` par configured hai.
+
+```powershell
+# Terminal 1 — FastAPI backend
+Set-Location C:\CloudOptima\backend
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 5000
+```
+
+```powershell
+# Terminal 2 — React + Vite frontend
+Set-Location C:\CloudOptima
+npm run dev -- --host 127.0.0.1 --port 5173
+```
